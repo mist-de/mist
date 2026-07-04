@@ -1,9 +1,0 @@
-0
-26885680 738198698 1783186755846532849 d97e3e22b6f6c807ba0d2e4820b6fb4b 1 .zig-cache/o/7395b1cbfa32011622b5e757a79a19e5/zig-wayland-scanner
-165075 269911333 1000000000 5755d4cc7a27c06246e39d6728c2c3dc 0 /nix/store/74r99w2f00ph42nb06sndxj5ici5m4z2-wayland-scanner-1.25.0/share/wayland/wayland.xml
-62861 538525623 1000000000 e0faa866ad483ea9d4a8f971845fd4d1 0 /nix/store/gb7p46pjggn89knd03w4i60c0byyfbry-wayland-protocols-1.48/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
-16072 740057844 1000000000 8fd3a618c1c8d286de7a13591894028d 0 /nix/store/gb7p46pjggn89knd03w4i60c0byyfbry-wayland-protocols-1.48/share/wayland-protocols/staging/ext-session-lock/ext-session-lock-v1.xml
-9142 203503018 1000000000 90a7834f314fb09a1d43033a587654d8 0 /nix/store/gb7p46pjggn89knd03w4i60c0byyfbry-wayland-protocols-1.48/share/wayland-protocols/staging/cursor-shape/cursor-shape-v1.xml
-56775 404509827 1000000000 707e69f6503630eee20bd12544bc2fb9 0 /nix/store/gb7p46pjggn89knd03w4i60c0byyfbry-wayland-protocols-1.48/share/wayland-protocols/stable/tablet/tablet-v2.xml
-2773 402873691 1783186997616444209 5a183c1c266244d53b17f1bb4bc074a0 1 protocols/wlr-layer-shell-unstable-v1.xml
-84725 402873693 1783187130151915593 8b81f002e78620f1297fbcf48c509279 1 protocols/river-window-management-v1.xml

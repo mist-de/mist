@@ -1,3 +1,20 @@
-/zig-out
-/zig-cache
-/zig-pkg
+# Zig build artifacts
+/.zig-cache/
+/zig-out/
+/zig-pkg/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# Secret / local
+.env
+*.local

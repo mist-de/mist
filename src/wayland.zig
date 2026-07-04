@@ -6,7 +6,9 @@ pub const wl = wayland_lib.client.wl;
 pub const zwlr = wayland_lib.client.zwlr;
 pub const wp = wayland_lib.client.wp;
 pub const ext = wayland_lib.client.ext;
+pub const zdwl = wayland_lib.client.zdwl;
 
+const workspace = @import("workspace.zig");
 const Output = @import("output.zig");
 const seat_utils = @import("seat.zig");
 
@@ -48,6 +50,10 @@ foreign_toplevel_manager: ?*zwlr.ForeignToplevelManagerV1 = null,
 focused_title: [256]u8 = undefined,
 focused_title_len: usize = 0,
 
+dwl_ipc_manager: ?*zdwl.IpcManagerV2 = null,
+dwl_ipc_outputs: [max_outputs]?*zdwl.IpcOutputV2 = [_]?*zdwl.IpcOutputV2{null} ** max_outputs,
+ext_workspace_manager: ?*ext.WorkspaceManagerV1 = null,
+
 outputs: [max_outputs]Output = undefined,
 output_count: usize = 0,
 
@@ -78,6 +84,9 @@ pub fn init(self: *Wayland) !void {
         .foreign_toplevel_manager = null,
         .focused_title = undefined,
         .focused_title_len = 0,
+        .dwl_ipc_manager = null,
+        .dwl_ipc_outputs = [_]?*zdwl.IpcOutputV2{null} ** max_outputs,
+        .ext_workspace_manager = null,
         .outputs = undefined,
         .output_count = 0,
         .running = true,
@@ -92,6 +101,8 @@ pub fn init(self: *Wayland) !void {
 
     registry.setListener(*Wayland, registryListener, self);
     _ = display.roundtrip();
+
+    workspace.detect(self);
 
     if (self.compositor == null) return error.NoCompositor;
     if (self.shm == null) return error.NoShm;
@@ -161,13 +172,23 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, self: *Way
             } else if (std.mem.orderZ(u8, g.interface, "zwlr_foreign_toplevel_manager_v1") == .eq) {
                 self.foreign_toplevel_manager = registry.bind(g.name, zwlr.ForeignToplevelManagerV1, @min(g.version, 3)) catch return;
                 self.foreign_toplevel_manager.?.setListener(*Wayland, toplevelManagerListener, self);
+            } else if (std.mem.orderZ(u8, g.interface, "zdwl_ipc_manager_v2") == .eq) {
+                self.dwl_ipc_manager = registry.bind(g.name, zdwl.IpcManagerV2, @min(g.version, 2)) catch return;
+                self.dwl_ipc_manager.?.setListener(*Wayland, dwlIpcManagerListener, self);
+            } else if (std.mem.orderZ(u8, g.interface, "ext_workspace_manager_v1") == .eq) {
+                self.ext_workspace_manager = registry.bind(g.name, ext.WorkspaceManagerV1, @min(g.version, 1)) catch return;
+                self.ext_workspace_manager.?.setListener(*Wayland, extWorkspaceManagerListener, self);
             }
         },
         .global_remove => |remove| {
             for (self.outputs[0..self.output_count], 0..) |*output, i| {
                 if (output.output_context.id == remove.name) {
                     output.deinit();
+                    if (self.dwl_ipc_outputs[i]) |dwl_out| {
+                        dwl_out.destroy();
+                    }
                     std.mem.copyForwards(Output, self.outputs[i..], self.outputs[i + 1 .. self.output_count]);
+                    std.mem.copyForwards(?*zdwl.IpcOutputV2, self.dwl_ipc_outputs[i..], self.dwl_ipc_outputs[i + 1 .. self.output_count]);
                     self.output_count -= 1;
                     return;
                 }
@@ -191,6 +212,14 @@ fn onOutputAdded(self: *Wayland, wl_output: *wl.Output, name: u32) void {
         log.warn("Failed to initialize output: {s}", .{@errorName(err)});
         return;
     };
+
+    if (self.dwl_ipc_manager) |mgr| {
+        self.dwl_ipc_outputs[idx] = mgr.getOutput(wl_output) catch null;
+        if (self.dwl_ipc_outputs[idx]) |dwl_out| {
+            dwl_out.setListener(*Wayland, dwlIpcOutputListener, self);
+        }
+    }
+
     self.output_count += 1;
     log.info("Output added: {} (total: {})", .{ name, self.output_count });
 }
@@ -275,5 +304,32 @@ fn toplevelHandleListener(handle: *zwlr.ForeignToplevelHandleV1, event: zwlr.For
             handle.destroy();
         },
         .parent => {},
+    }
+}
+
+fn dwlIpcManagerListener(_: *zdwl.IpcManagerV2, event: zdwl.IpcManagerV2.Event, _: *Wayland) void {
+    switch (event) {
+        .tags => |ev| workspace.onDwlTags(ev.amount),
+        .layout => {},
+    }
+}
+
+fn dwlIpcOutputListener(_: *zdwl.IpcOutputV2, event: zdwl.IpcOutputV2.Event, _: *Wayland) void {
+    switch (event) {
+        .tag => |ev| {
+            const state_val: u32 = @intCast(@intFromEnum(ev.state));
+            workspace.onDwlTagUpdate(ev.tag, state_val, ev.clients, ev.focused);
+        },
+        .frame => {},
+        else => {},
+    }
+}
+
+fn extWorkspaceManagerListener(_: *ext.WorkspaceManagerV1, event: ext.WorkspaceManagerV1.Event, self: *Wayland) void {
+    switch (event) {
+        .workspace_group => {},
+        .workspace => {},
+        .done => {},
+        .finished => self.ext_workspace_manager = null,
     }
 }

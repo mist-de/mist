@@ -7,6 +7,8 @@ const Output = @import("output.zig").Output;
 const Config = @import("config.zig");
 const text = @import("shell/render/text.zig");
 const geo = @import("geo.zig");
+const battery = @import("battery.zig");
+const volume = @import("volume.zig");
 
 const log = std.log.scoped(.main);
 
@@ -83,21 +85,60 @@ pub const App = struct {
         try self.wayland.init();
         global_font = initFont() catch null;
         Config.initGlobal(std.heap.page_allocator);
+        battery.init();
+        volume.init();
     }
 
     fn deinit(self: *App) void {
+        volume.deinit();
+        battery.deinit();
         self.wayland.deinit();
         if (global_font) |*f| f.deinit();
         Config.deinitGlobal();
     }
 
     fn run(self: *App) !void {
+        var poll_count: u64 = 0;
         while (self.wayland.running) {
             _ = self.wayland.display.flush();
-            var fd: [1]posix.pollfd = .{.{ .fd = self.wayland.display.getFd(), .events = posix.POLL.IN, .revents = 0 }};
-            _ = posix.poll(fd[0..], 100) catch break;
-            if (fd[0].revents & (posix.POLL.ERR | posix.POLL.HUP) != 0) break;
-            if (fd[0].revents & posix.POLL.IN != 0) {
+
+            var fds: [2]posix.pollfd = undefined;
+            var nfds: usize = 1;
+            fds[0] = .{ .fd = self.wayland.display.getFd(), .events = posix.POLL.IN, .revents = 0 };
+
+            const battery_fd = battery.getFd();
+            var battery_fd_index: ?usize = null;
+            if (battery_fd >= 0) {
+                battery_fd_index = nfds;
+                fds[nfds] = .{ .fd = battery_fd, .events = posix.POLL.IN, .revents = 0 };
+                nfds += 1;
+            }
+
+            _ = posix.poll(fds[0..nfds], 100) catch break;
+
+            if (fds[0].revents & (posix.POLL.ERR | posix.POLL.HUP) != 0) break;
+
+            if (battery_fd_index) |idx| {
+                if (fds[idx].revents & posix.POLL.IN != 0) {
+                    battery.process();
+                    for (self.wayland.outputs[0..self.wayland.output_count]) |*output| {
+                        output.full_redraw = true;
+                        output.requestFrame();
+                    }
+                }
+            }
+
+            // Periodic volume refresh (~5 seconds)
+            poll_count += 1;
+            if (poll_count % 50 == 0) {
+                volume.refresh();
+                for (self.wayland.outputs[0..self.wayland.output_count]) |*output| {
+                    output.full_redraw = true;
+                    output.requestFrame();
+                }
+            }
+
+            if (fds[0].revents & posix.POLL.IN != 0) {
                 switch (self.wayland.dispatch()) {
                     .SUCCESS => {},
                     .CONNRESET, .INVAL => break,

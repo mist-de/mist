@@ -1,6 +1,9 @@
 const std = @import("std");
 const rdr = @import("../shell/render.zig");
 const text = @import("../shell/render/text.zig");
+const battery = @import("../battery.zig");
+const volume = @import("../volume.zig");
+const workspace = @import("../workspace.zig");
 
 pub const Spacer = struct {
     pub fn init() Spacer {
@@ -31,8 +34,6 @@ pub const Separator = struct {
 
 pub const TagWidget = struct {
     font: *text.Font,
-    count: u8 = 5,
-    active: u8 = 0,
     color_active: rdr.Color = .{ .r = 0x89, .g = 0xb4, .b = 0xfa, .a = 0xff },
     color_inactive: rdr.Color = .{ .r = 0x58, .g = 0x5b, .b = 0x70, .a = 0xff },
     color_urgent: rdr.Color = .{ .r = 0xf3, .g = 0x8b, .b = 0xa8, .a = 0xff },
@@ -42,22 +43,28 @@ pub const TagWidget = struct {
     }
     pub fn deinit(_: *TagWidget) void {}
 
-    pub fn measure(self: *TagWidget, _: u32, _: u32) u32 {
-        return @as(u32, self.count) * 20 + 12;
+    pub fn measure(_: *TagWidget, _: u32, _: u32) u32 {
+        return @as(u32, workspace.tag_state.tag_count) * 20 + 12;
     }
 
     pub fn render(self: *TagWidget, surface: *rdr.Surface, x: i32, y: i32, _: u32, h: u32) void {
         const tag_size: u32 = 6;
         const gap: u32 = 12;
+        const n_tags = workspace.tag_state.tag_count;
         const total_w = self.measure(0, 0);
-        const start_x = x + @as(i32, @intCast((total_w - (self.count * (tag_size +| gap) -| gap)) / 2));
+        const start_x = x + @as(i32, @intCast((total_w - (n_tags * (tag_size +| gap) -| gap)) / 2));
         const cy = y + @as(i32, @intCast(h / 2));
 
-        for (0..self.count) |i| {
+        for (0..n_tags) |i| {
             const tx = start_x + @as(i32, @intCast(i * (tag_size + gap)));
-            const color = if (i == self.active) self.color_active else self.color_inactive;
+            const color = if (workspace.isTagUrgent(@intCast(i))) self.color_urgent else if (workspace.isTagActive(@intCast(i))) self.color_active else self.color_inactive;
             surface.fillRect(tx, cy - @as(i32, @intCast(tag_size / 2)), tag_size, tag_size, color);
         }
+    }
+
+    pub fn count(self: *TagWidget) u8 {
+        _ = self;
+        return workspace.tag_state.tag_count;
     }
 };
 
@@ -124,8 +131,8 @@ pub const Clock = struct {
 
 pub const BatteryStub = struct {
     font: *text.Font,
-    percent: u8 = 87,
     color: rdr.Color = .{ .r = 0xa6, .g = 0xe3, .b = 0xa1, .a = 0xff },
+    last_percent: u8 = 255,
 
     pub fn init(font: *text.Font) BatteryStub {
         return .{ .font = font };
@@ -136,7 +143,12 @@ pub const BatteryStub = struct {
     }
     pub fn render(self: *BatteryStub, surface: *rdr.Surface, x: i32, _: i32, _: u32, h: u32) void {
         var buf: [8]u8 = undefined;
-        const text_str = std.fmt.bufPrint(&buf, "B{d}%", .{self.percent}) catch "BAT";
+        const pct = if (battery.state.available) @as(u8, @intCast(@min(@as(u32, @intFromFloat(battery.state.percentage)), 100))) else 255;
+        const prefix = if (battery.state.charging) "C" else "B";
+        const text_str = if (pct <= 100)
+            std.fmt.bufPrint(&buf, "{s}{d}%", .{ prefix, pct }) catch "BAT"
+        else
+            "BAT";
         const fs = self.font.size;
         const ty: i32 = @intCast((h -| @as(u32, @intFromFloat(fs))) / 2 + @as(u32, @intFromFloat(fs)) - 4);
         self.font.drawText(surface.pixels, surface.stride_pixels, surface.width, surface.height, text_str, x + 6, ty, self.color);
@@ -145,7 +157,6 @@ pub const BatteryStub = struct {
 
 pub const VolumeStub = struct {
     font: *text.Font,
-    percent: u8 = 75,
     color: rdr.Color = .{ .r = 0x89, .g = 0xeb, .b = 0xeb, .a = 0xff },
 
     pub fn init(font: *text.Font) VolumeStub {
@@ -153,11 +164,13 @@ pub const VolumeStub = struct {
     }
     pub fn deinit(_: *VolumeStub) void {}
     pub fn measure(self: *VolumeStub, _: u32, _: u32) u32 {
-        return self.font.measureText("V75%") + 12;
+        return self.font.measureText("V100%") + 12;
     }
     pub fn render(self: *VolumeStub, surface: *rdr.Surface, x: i32, _: i32, _: u32, h: u32) void {
         var buf: [8]u8 = undefined;
-        const text_str = std.fmt.bufPrint(&buf, "V{d}%", .{self.percent}) catch "VOL";
+        const pct = if (volume.state.available) @as(u8, @intCast(@min(@as(u32, @intFromFloat(volume.state.percentage)), 100))) else 0;
+        const icon = if (volume.state.muted) "M" else "V";
+        const text_str = std.fmt.bufPrint(&buf, "{s}{d}%", .{ icon, pct }) catch "VOL";
         const fs = self.font.size;
         const ty: i32 = @intCast((h -| @as(u32, @intFromFloat(fs))) / 2 + @as(u32, @intFromFloat(fs)) - 4);
         self.font.drawText(surface.pixels, surface.stride_pixels, surface.width, surface.height, text_str, x + 6, ty, self.color);

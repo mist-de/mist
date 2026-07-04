@@ -13,11 +13,13 @@ pub fn build(b: *std.Build) void {
         scanner.addSystemProtocol("staging/ext-session-lock/ext-session-lock-v1.xml");
         scanner.addSystemProtocol("staging/cursor-shape/cursor-shape-v1.xml");
         scanner.addSystemProtocol("stable/tablet/tablet-v2.xml");
+        scanner.addSystemProtocol("staging/ext-workspace/ext-workspace-v1.xml");
 
         // Custom protocols (vendored)
         scanner.addCustomProtocol(b.path("protocols/wlr-layer-shell-unstable-v1.xml"));
         scanner.addCustomProtocol(b.path("protocols/river-window-management-v1.xml"));
         scanner.addCustomProtocol(b.path("protocols/wlr-foreign-toplevel-management-unstable-v1.xml"));
+        scanner.addCustomProtocol(b.path("protocols/dwl-ipc-unstable-v2.xml"));
 
         scanner.generate("wl_compositor", 5);
         scanner.generate("wl_shm", 1);
@@ -30,6 +32,8 @@ pub fn build(b: *std.Build) void {
         scanner.generate("zwlr_layer_shell_v1", 4);
         scanner.generate("river_window_manager_v1", 5);
         scanner.generate("zwlr_foreign_toplevel_manager_v1", 3);
+        scanner.generate("ext_workspace_manager_v1", 1);
+        scanner.generate("zdwl_ipc_manager_v2", 2);
 
         break :blk b.createModule(.{
             .root_source_file = scanner.result,
