@@ -2,29 +2,27 @@ mod bar;
 mod calc;
 mod config;
 mod compositor;
-mod ease;
+mod fonts;
 mod launcher;
 mod render;
 mod shell_ipc;
 mod state;
 mod status;
-mod text;
 mod tokens;
 mod wl;
 
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::time::Duration;
 
-use calloop::channel::{self, Channel};
+use calloop::channel::Channel;
 use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, Mode};
-use std::ptr::NonNull;
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
 use wayland_client::globals::registry_queue_init;
-use wayland_client::Proxy;
 use wayland_client::protocol::wl_compositor::WlCompositor;
+use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_seat::WlSeat;
+use wayland_client::protocol::wl_shm::WlShm;
 use wayland_client::Connection;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1};
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor;
@@ -32,45 +30,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Ancho
 use crate::bar::render_bar;
 use crate::state::{BarSurface, LauncherSurface, State, Tag};
 
-type CmdTx = channel::Sender<(u64, serde_json::Value)>;
+type CmdTx = calloop::channel::Sender<(u64, serde_json::Value)>;
 type CmdRx = Channel<(u64, serde_json::Value)>;
-
-fn auto_detect_vulkan_icd() {
-    if std::env::var_os("VK_ICD_FILENAMES").is_some() {
-        return;
-    }
-    let icd_dir = std::path::Path::new("/usr/share/vulkan/icd.d");
-    let dir = match std::fs::read_dir(icd_dir) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let mut candidates: Vec<(u8, std::path::PathBuf)> = Vec::new();
-    for entry in dir.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let name = path.file_stem().and_then(|n| n.to_str()).unwrap_or("");
-        let priority: u8 = if name.contains("radeon") || name.contains("radv") {
-            30  // RADV is preferred
-        } else if name.contains("amd") || name.contains("pro") {
-            20
-        } else if name.contains("intel") || name.contains("anv") {
-            25
-        } else if name.contains("virtio") || name.contains("lvp") {
-            10
-        } else {
-            5
-        };
-        candidates.push((priority, path));
-    }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    if let Some((_, path)) = candidates.into_iter().next() {
-        let p = path.to_string_lossy().to_string();
-        eprintln!("[mist] auto-detected vulkan icd: {p}");
-        unsafe { std::env::set_var("VK_ICD_FILENAMES", &p); }
-    }
-}
 
 fn main() {
     if std::env::args().any(|a| a == "--help" || a == "-h") {
@@ -93,7 +54,14 @@ fn main() {
     eprintln!("[mist] version {}", env!("CARGO_PKG_VERSION"));
     eprintln!("[mist] debug={}", std::env::var("MIST_DEBUG").unwrap_or_default());
 
-    auto_detect_vulkan_icd();
+    crate::launcher::init_debug_flag();
+
+    // Install embedded fonts
+    if let Some(font_dir) = fonts::install_embedded_fonts() {
+        eprintln!("[mist] fonts installed at {:?}", font_dir);
+    } else {
+        eprintln!("[mist] embedded font install skipped, using system fonts");
+    }
 
     use std::panic;
     let prev = panic::take_hook();
@@ -116,6 +84,8 @@ fn main() {
     let compositor: WlCompositor = globals.bind(&qh, 4..=6, ()).expect("wl_compositor");
     let layer_shell: ZwlrLayerShellV1 = globals.bind(&qh, 1..=4, ()).expect("wlr-layer-shell");
     let _seat: WlSeat = globals.bind(&qh, 1..=9, ()).expect("wl_seat");
+    let _output: WlOutput = globals.bind(&qh, 1..=4, ()).expect("wl_output");
+    let shm: WlShm = globals.bind(&qh, 1..=1, ()).expect("wl_shm");
     let cursor_shape_manager = globals.bind(&qh, 1..=1, ()).ok();
 
     let bar_w = crate::tokens::BAR_TOTAL_W as i32;
@@ -130,108 +100,34 @@ fn main() {
     let init_w = bar_w;
     let init_h = 1080i32;
 
-    // Initialize wgpu
-    let gpu_instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        flags: wgpu::InstanceFlags::default(),
-        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-        backend_options: wgpu::BackendOptions::from_env_or_default(),
-        display: None,
-    });
-
-    let raw_display = {
-        let ptr = conn.backend().display_id().as_ptr() as *mut std::ffi::c_void;
-        RawDisplayHandle::Wayland(WaylandDisplayHandle::new(NonNull::new(ptr).unwrap()))
-    };
-    let raw_window = {
-        let ptr = surface.id().as_ptr() as *mut std::ffi::c_void;
-        RawWindowHandle::Wayland(WaylandWindowHandle::new(NonNull::new(ptr).unwrap()))
-    };
-    let bar_wgpu_surface = unsafe {
-        gpu_instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(raw_display),
-            raw_window_handle: raw_window,
-        })
-    }.expect("create wgpu surface");
-
-    let adapter = pollster::block_on(gpu_instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: Some(&bar_wgpu_surface),
-        force_fallback_adapter: false,
-    })).expect("Failed to find a suitable GPU adapter");
-
-    let bar_surface_format = bar_wgpu_surface.get_capabilities(&adapter).formats.into_iter()
-        .find(|f| *f == wgpu::TextureFormat::Rgba8Unorm)
-        .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
-
-    let (gpu_device, gpu_queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("Mist GPU Device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            trace: wgpu::Trace::Off,
-        },
-    )).expect("Failed to create GPU device");
-
-    bar_wgpu_surface.configure(&gpu_device, &wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: bar_surface_format,
-        width: init_w as u32,
-        height: init_h as u32,
-        present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
-        view_formats: vec![],
-        desired_maximum_frame_latency: 1,
-    });
-
-    let vello_renderer = vello::Renderer::new(
-        &gpu_device,
-        vello::RendererOptions {
-            use_cpu: false,
-            antialiasing_support: vello::AaSupport::all(),
-            num_init_threads: None,
-            pipeline_cache: None,
-        },
-    ).expect("Failed to create Vello renderer");
-
-    let _ = conn.flush();
-
     let ct = compositor::detect();
     eprintln!("[mist] compositor: {:?}", ct);
     let ws_rx = compositor::spawn_workspace_poller(ct);
 
-    let (cmd_tx, cmd_rx): (CmdTx, CmdRx) = channel::channel();
+    let (cmd_tx, cmd_rx): (CmdTx, CmdRx) = calloop::channel::channel();
     let (resp_tx, resp_rx) = std::sync::mpsc::channel::<(u64, serde_json::Value)>();
-    shell_ipc::spawn_shell_ipc(cmd_tx, Some((resp_tx, resp_rx)));
+    shell_ipc::spawn_shell_ipc(cmd_tx.clone(), Some((resp_tx, resp_rx)));
 
     let config = crate::config::load();
     let mut state = State {
         conn: conn.clone(), qh,
-        compositor, layer_shell,
+        compositor, layer_shell, shm,
         bar: BarSurface {
             surface, layer,
-            wgpu_surface: Some(bar_wgpu_surface),
             w: init_w, h: init_h,
             configured: false, frame_pending: false, dirty: true,
-            surface_format: bar_surface_format,
-            intermediate_texture: None, intermediate_view: None, blitter: None,
+            shm: None,
         },
         launcher: LauncherSurface {
             surface: None, layer: None,
-            wgpu_surface: None,
             w: 0, h: 0,
             configured: false, frame_pending: false, dirty: false,
-            surface_format: wgpu::TextureFormat::Rgba8Unorm,
-            intermediate_texture: None, intermediate_view: None, blitter: None,
+            shm: None,
             visible: false, apps: Vec::new(),
             view: crate::launcher::LauncherView::AppList, matching: Vec::new(), matching_actions: Vec::new(),
             selection: 0, query: String::new(), scroll_offset: 0, panel: None,
             actions: Vec::new(), start_time: std::time::Instant::now(),
             calc_result: None,
-            anim_show: crate::ease::AnimState::new(),
-            anim_hide: crate::ease::AnimState::new(),
         },
         pointer: None, keyboard: None,
         pointer_x: 0.0, pointer_y: 0.0, pointer_serial: 0,
@@ -239,27 +135,19 @@ fn main() {
         compositor_type: ct,
         clock: String::new(), date: String::new(),
         workspaces: (1..=9).map(|i| (i.to_string(), Tag::default())).collect(),
-        font: crate::text::init_font_system(), font_cache: crate::text::FontCache::new(),
         xkb_ctx: None, xkb_state: None,
         config,
         status: crate::status::SystemStatus::default(),
         hovered_ws: None,
-        gpu_instance,
-        gpu_device,
-        gpu_queue,
-        vello_renderer,
-        icon_cache: std::collections::HashMap::new(),
+        scale: 1,
     };
 
-    // Roundtrip: force compositor to process pending requests and
-    // send events (including layer-surface configure).
     let _ = eq.roundtrip(&mut state);
 
-    // If configure still hasn't arrived, pre-configure bar with initial size.
     if !state.bar.configured {
         state.bar.configured = true;
-        let scene = render_bar(&mut state);
-        state.commit_bar(scene);
+        render_bar(&mut state);
+        state.commit_bar();
     }
 
     let mut loop_ = EventLoop::<State>::try_new().expect("event loop");
@@ -271,21 +159,55 @@ fn main() {
     let owned_fd = unsafe { OwnedFd::from_raw_fd(dup_fd) };
     let conn_ = Some(conn);
     let mut eq_ = Some(eq);
-    handle.insert_source(Generic::new(owned_fd, Interest::READ, Mode::Level), move |_, _, state: &mut State| -> Result<_, std::io::Error> {
+    static WL_DISPATCH_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    handle.insert_source(Generic::new(owned_fd, Interest::READ, Mode::Edge), move |_, _, state: &mut State| -> Result<_, std::io::Error> {
         let eq = eq_.as_mut().unwrap();
         let conn = conn_.as_ref().unwrap();
-        if let Some(guard) = conn.prepare_read() && let Err(e) = guard.read() { eprintln!("read err: {:?}", e); std::process::exit(1) }
-        if let Err(e) = eq.dispatch_pending(state) { eprintln!("dispatch err: {:?}", e); std::process::exit(1) }
+        let count = WL_DISPATCH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count % 200 == 0 {
+            eprintln!("[mist-wl] dispatch #{}", count);
+        }
+        // Drain all pending events: keep reading and dispatching until no more events
+        loop {
+            if let Some(guard) = conn.prepare_read() {
+                if let Err(e) = guard.read() { eprintln!("read err: {:?}", e); std::process::exit(1) }
+            }
+            match eq.dispatch_pending(state) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(e) => { eprintln!("dispatch err: {:?}", e); std::process::exit(1) }
+            }
+        }
         if let Err(e) = conn.flush() { eprintln!("flush err: {:?}", e); std::process::exit(1) }
         Ok(calloop::PostAction::Continue)
     }).expect("wl source");
 
-    handle.insert_source(Timer::from_duration(Duration::from_millis(16)), move |_, _, state: &mut State| {
-        state.status = crate::status::poll_status();
-        let tz = state.config.timezone.as_deref().and_then(|s| s.parse::<chrono_tz::Tz>().ok());
-        let (d, c) = match tz {
+    let mut last_status_poll = std::time::Instant::now();
+    let status_poll_interval = Duration::from_secs(10);
+    let parsed_tz = state.config.timezone.as_deref().and_then(|s| s.parse::<chrono_tz::Tz>().ok());
+    let mut last_date = String::new();
+    let mut last_clock = String::new();
+
+    static TIMER_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    handle.insert_source(Timer::from_duration(Duration::from_secs(1)), move |_, _, state: &mut State| {
+        let count = TIMER_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count % 30 == 0 {
+            eprintln!("[mist-timer] tick #{} dirty={} configured={} fp={}", count, state.bar.dirty, state.bar.configured, state.bar.frame_pending);
+        }
+        let now = std::time::Instant::now();
+
+        if now.duration_since(last_status_poll) >= status_poll_interval {
+            last_status_poll = now;
+            let new_status = crate::status::poll_status();
+            if new_status != state.status {
+                state.status = new_status;
+                state.bar.dirty = true;
+            }
+        }
+
+        let (d, c) = match &parsed_tz {
             Some(tz) => {
-                let now = chrono::Utc::now().with_timezone(&tz);
+                let now = chrono::Utc::now().with_timezone(tz);
                 (now.format("%a %b %-d").to_string(), now.format("%H:%M").to_string())
             }
             None => {
@@ -293,30 +215,31 @@ fn main() {
                 (now.format("%a %b %-d").to_string(), now.format("%H:%M").to_string())
             }
         };
-        let clock_changed = d != state.date || c != state.clock;
-        state.date = d;
-        state.clock = c;
-
-        if clock_changed || state.bar.dirty {
+        if d != last_date || c != last_clock {
+            last_date = d;
+            last_clock = c;
+            state.date = last_date.clone();
+            state.clock = last_clock.clone();
             state.bar.dirty = true;
-            if state.bar.configured && !state.bar.frame_pending {
-                let scene = render_bar(state);
-                state.commit_bar(scene);
-            }
+        }
+
+        if state.bar.dirty && state.bar.configured && !state.bar.frame_pending {
+            render_bar(state);
+            state.commit_bar();
         }
         if state.launcher.dirty {
             state.flush_launcher_render();
         }
-        TimeoutAction::ToDuration(Duration::from_millis(16))
+        TimeoutAction::ToDuration(Duration::from_secs(1))
     }).expect("timer");
 
     handle.insert_source(ws_rx, |event, _, state: &mut State| {
         if let calloop::channel::Event::Msg(list) = event && state.workspaces != list {
             state.workspaces = list;
             state.bar.dirty = true;
-            if state.bar.configured {
-                let scene = render_bar(state);
-                state.commit_bar(scene);
+            if state.bar.configured && !state.bar.frame_pending {
+                render_bar(state);
+                state.commit_bar();
             }
         }
     }).expect("ws channel");

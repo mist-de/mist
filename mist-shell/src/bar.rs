@@ -1,193 +1,275 @@
-use vello::Scene;
-
-use crate::render::{draw_battery, draw_power, draw_speaker, draw_wifi, fill_rounded_rect, stroke_rounded_rect, color};
+use crate::render::*;
 use crate::state::State;
-use crate::text::{render_text, text_width, FontCache};
-use cosmic_text::FontSystem;
 use crate::tokens::*;
-use cosmic_text::Color as CosmicColor;
 
-fn draw_capsule(scene: &mut Scene, x: f32, y: f32, w: f32, h: f32, c: (u8, u8, u8, u8), radius: f32) {
-    fill_rounded_rect(scene, x, y, w, h, radius, color(c));
+// ============================================================
+// Pango text helpers
+// ============================================================
+
+fn render_text(cr: &cairo::Context, x: f64, y: f64, text: &str, size: f64, col: (u8, u8, u8, u8)) {
+    let layout = pangocairo::functions::create_layout(cr);
+    layout.set_text(text);
+    let desc = pango::FontDescription::from_string(&format!("GoogleSansFlex {}", size as i32));
+    layout.set_font_description(Some(&desc));
+    set_source_rgba(cr, col);
+    cr.move_to(x, y);
+    pangocairo::functions::show_layout(cr, &layout);
 }
 
-fn c2c(c: (u8, u8, u8, u8)) -> CosmicColor {
-    CosmicColor::rgba(c.0, c.1, c.2, c.3)
+/// Measure text width in pixels without rendering.
+fn text_width(cr: &cairo::Context, text: &str, size: f64) -> f64 {
+    let layout = pangocairo::functions::create_layout(cr);
+    layout.set_text(text);
+    let desc = pango::FontDescription::from_string(&format!("GoogleSansFlex {}", size as i32));
+    layout.set_font_description(Some(&desc));
+    let (w, _) = layout.pixel_size();
+    w as f64
 }
 
-pub struct RenderCtx<'a> {
-    pub cache: &'a mut FontCache,
-    pub font: &'a mut FontSystem,
-    pub clock: &'a str,
-    pub date: &'a str,
-    pub volume_muted: bool,
-    pub network_connected: bool,
-    pub battery: Option<u8>,
-    pub battery_charging: bool,
-    pub hovered_ws: Option<usize>,
+fn text_h(size: f64) -> f64 {
+    (size * 1.4).ceil()
 }
 
-fn ws_mod(scene: &mut Scene, ctx: &mut RenderCtx, workspaces: &[(String, crate::state::Tag)], x: f32, y: f32, w: f32) {
-    let item_x = x + (w - WS_ITEM_W) / 2.0;
-    let mut cy = y;
-    for (i, (name, tag)) in workspaces.iter().enumerate() {
-        let item_y = cy;
+// ============================================================
+// Module height measurement
+// ============================================================
 
-        if tag.active {
-            draw_capsule(scene, item_x, item_y, WS_ITEM_W, WS_ITEM_H, C_WS_ACTIVE_BG, RADIUS_FULL);
-        } else if Some(i) == ctx.hovered_ws {
-            draw_capsule(scene, item_x, item_y, WS_ITEM_W, WS_ITEM_H, C_MODULE_HOVER, RADIUS_FULL);
+fn os_h() -> f64 { 16.0 }
+
+fn ws_h(workspaces: &[(String, crate::state::Tag)]) -> f64 {
+    let n = workspaces.len().min(BAR_SHOWN_WORKSPACES) as f64;
+    if n == 0.0 { return 0.0; }
+    n * WS_ITEM_H as f64 + (n - 1.0) * WS_SPACING as f64 + WS_PILL_PAD_V as f64 * 2.0
+}
+
+fn clk_h() -> f64 {
+    text_h(CLOCK_TIME_SIZE as f64) + CLOCK_SPACING as f64 + text_h(CLOCK_DATE_SIZE as f64) + PAD_SM as f64 * 2.0
+}
+
+fn st_h() -> f64 {
+    STATUS_ICON_SIZE as f64 * 3.0 + STATUS_SPACING as f64 * 2.0 + PAD_MD as f64 * 2.0
+}
+
+fn pwr_h() -> f64 { 16.0 }
+
+fn total_content_h(workspaces: &[(String, crate::state::Tag)]) -> f64 {
+    let mut h = os_h() + BAR_MODULE_SPACING as f64;
+    let wh = ws_h(workspaces);
+    if wh > 0.0 { h += wh + BAR_MODULE_SPACING as f64; }
+    h += clk_h() + BAR_MODULE_SPACING as f64;
+    h += st_h() + BAR_MODULE_SPACING as f64;
+    h + pwr_h()
+}
+
+// ============================================================
+// Module rendering
+// ============================================================
+
+fn draw_os(cr: &cairo::Context, x: f64, y: f64, w: f64, scale: f64) {
+    let sz = os_h() * scale;
+    let ix = x + (w - sz) / 2.0;
+    fill_rounded_rect(cr, ix, y, sz, sz, sz / 2.0, C_M3_TERTIARY);
+    let d = 4.0 * scale;
+    fill_rounded_rect(cr, ix + (sz - d) / 2.0, y + (sz - d) / 2.0, d, d, d / 2.0, C_M3_ON_PRIMARY);
+}
+
+fn draw_ws(cr: &cairo::Context, workspaces: &[(String, crate::state::Tag)], x: f64, y: f64, w: f64, scale: f64) {
+    let n = workspaces.len().min(BAR_SHOWN_WORKSPACES);
+    if n == 0 { return; }
+    let item = WS_ITEM_H as f64 * scale;
+    let pill = ws_h(workspaces) * scale;
+    let content = n as f64 * item + (n as f64 - 1.0) * WS_SPACING as f64 * scale;
+    let pad = (pill - content) / 2.0;
+
+    fill_rounded_rect(cr, x, y, w, pill, RADIUS_FULL as f64, C_MODULE_BG);
+
+    let active = workspaces.iter().position(|(_, t)| t.active);
+    for i in 0..n {
+        let (name, tag) = &workspaces[i];
+        let iy = y + pad + i as f64 * (item + WS_SPACING as f64 * scale);
+
+        if Some(i) == active {
+            let ix = x + (w - WS_INDICATOR_W as f64 * scale) / 2.0;
+            fill_rounded_rect(cr, ix, iy, WS_INDICATOR_W as f64 * scale, item, RADIUS_FULL as f64, C_WS_ACTIVE_BG);
         }
 
-        if !tag.active && tag.occupied {
-            let dot_x = item_x + WS_ITEM_W - 12.0;
-            let dot_y = item_y + 6.0;
-            draw_capsule(scene, dot_x, dot_y, WS_OCCUPIED_DOT, WS_OCCUPIED_DOT, C_WS_OCCUPIED_DOT, RADIUS_FULL);
-        }
+        let col = if Some(i) == active { C_WS_ACTIVE_TEXT }
+        else if tag.occupied { C_WS_INACTIVE_TEXT }
+        else { C_WS_UNOCCUPIED_TEXT };
 
-        let label_col = if tag.active { C_WS_ACTIVE_TEXT } else { C_M3_ON_SURFACE };
-        let tw = text_width(ctx.font, name, WS_LABEL_SIZE, "Rubik");
-        render_text(scene, ctx.cache, ctx.font, name,
-            item_x + (WS_ITEM_W - tw) / 2.0,
-            item_y + (WS_ITEM_H - WS_LABEL_SIZE) / 2.0,
-            WS_LABEL_SIZE, c2c(label_col), "Rubik");
-
-        cy += WS_ITEM_H + WS_SPACING;
+        let label_size = WS_LABEL_SIZE as f64 * scale;
+        let tw = text_width(cr, name, label_size);
+        render_text(cr,
+            x + (w - tw) / 2.0,
+            iy + (item - label_size * 1.4) / 2.0,
+            name, label_size, col);
     }
 }
 
-fn os_pill(scene: &mut Scene, _ctx: &mut RenderCtx, x: f32, y: f32, w: f32) {
-    let px = x + (w - MODULE_PILL_W) / 2.0;
-    let py = y + (MODULE_ITEM_H - MODULE_PILL_H) / 2.0;
-    draw_capsule(scene, px, py, MODULE_PILL_W, MODULE_PILL_H, C_M3_PRIMARY, RADIUS_FULL);
-    let mx = px + MODULE_PILL_W / 2.0 - 5.0;
-    let my = py + MODULE_PILL_H / 2.0 - 2.0;
-    draw_capsule(scene, mx, my, 10.0, 4.0, C_WS_ACTIVE_TEXT, 2.0);
+fn draw_clock(cr: &cairo::Context, clock: &str, date: &str, x: f64, y: f64, w: f64, scale: f64) {
+    let pill = clk_h() * scale;
+    let time_h = text_h(CLOCK_TIME_SIZE as f64) * scale;
+    let date_h = text_h(CLOCK_DATE_SIZE as f64) * scale;
+    let content = time_h + CLOCK_SPACING as f64 * scale + date_h;
+    let pad = (pill - content) / 2.0;
+
+    fill_rounded_rect(cr, x, y, w, pill, RADIUS_FULL as f64, C_MODULE_BG);
+
+    let cx = x + w / 2.0;
+    let mut cy = y + pad;
+
+    let time_size = CLOCK_TIME_SIZE as f64 * scale;
+    let tw = text_width(cr, clock, time_size);
+    render_text(cr, cx - tw / 2.0, cy, clock, time_size, C_CLOCK);
+    cy += time_h + CLOCK_SPACING as f64 * scale;
+
+    let date_size = CLOCK_DATE_SIZE as f64 * scale;
+    let dw = text_width(cr, date, date_size);
+    render_text(cr, cx - dw / 2.0, cy, date, date_size, C_CLOCK);
 }
 
-fn clock_mod(scene: &mut Scene, ctx: &mut RenderCtx, x: f32, y: f32, w: f32) {
+fn draw_status(cr: &cairo::Context, status: &crate::status::SystemStatus, x: f64, y: f64, w: f64, scale: f64) {
+    let pill = st_h() * scale;
+    let icon_sz = STATUS_ICON_SIZE as f64 * scale;
+    let spacing = STATUS_SPACING as f64 * scale;
+    let content = icon_sz * 3.0 + spacing * 2.0;
+    let pad = (pill - content) / 2.0;
+
+    fill_rounded_rect(cr, x, y, w, pill, RADIUS_FULL as f64, C_MODULE_BG);
+
     let cx = x + w / 2.0;
-    let tw = text_width(ctx.font, ctx.clock, CLOCK_TIME_SIZE, "Rubik");
-    render_text(scene, ctx.cache, ctx.font, ctx.clock,
-        cx - tw / 2.0, y + 8.0, CLOCK_TIME_SIZE, c2c(C_CLOCK_TIME), "Rubik");
-    let dw = text_width(ctx.font, ctx.date, CLOCK_DATE_SIZE, "Rubik");
-    render_text(scene, ctx.cache, ctx.font, ctx.date,
-        cx - dw / 2.0, y + 30.0, CLOCK_DATE_SIZE, c2c(C_CLOCK_DATE), "Rubik");
-}
+    let ix = cx - icon_sz / 2.0;
+    let mut cy = y + pad;
 
-fn status_mod(scene: &mut Scene, ctx: &mut RenderCtx, x: f32, y: f32, w: f32) {
-    let cx = x + w / 2.0;
-    let mut cy = y;
-    let icon_x = cx - STATUS_ICON_SIZE / 2.0;
+    let acol = if status.volume_muted { C_STATUS_OFF } else { C_STATUS_ON };
+    draw_speaker(cr, ix, cy, icon_sz, status.volume_muted, acol);
+    cy += icon_sz + spacing;
 
-    let acol = if ctx.volume_muted { C_STATUS_OFF } else { C_STATUS_ON };
-    draw_speaker(scene, icon_x, cy + (MODULE_ITEM_H - STATUS_ICON_SIZE) / 2.0, STATUS_ICON_SIZE, ctx.volume_muted, acol);
-    cy += MODULE_ITEM_H;
+    let ncol = if status.network_connected { C_STATUS_ON } else { C_STATUS_OFF };
+    draw_wifi(cr, ix, cy, icon_sz, status.network_connected, ncol);
+    cy += icon_sz + spacing;
 
-    let ncol = if ctx.network_connected { C_STATUS_ON } else { C_STATUS_OFF };
-    draw_wifi(scene, icon_x, cy + (MODULE_ITEM_H - STATUS_ICON_SIZE) / 2.0, STATUS_ICON_SIZE, ctx.network_connected, ncol);
-    cy += MODULE_ITEM_H;
-
-    if let Some(pct) = ctx.battery {
-        let bcol = if pct <= 15 { C_M3_ERROR } else { C_STATUS_ON };
-        let by = cy + (MODULE_ITEM_H - STATUS_ICON_SIZE - 12.0) / 2.0;
-        draw_battery(scene, icon_x, by, STATUS_ICON_SIZE, pct, ctx.battery_charging, bcol);
+    if let Some(pct) = status.battery {
+        let bcol = if pct <= 15 { C_POWER } else { C_STATUS_ON };
+        draw_battery(cr, ix, cy, icon_sz, pct, status.battery_charging, bcol);
+        let pct_size = 8.0 * scale;
         let ps = format!("{}%", pct);
-        let pw = text_width(ctx.font, &ps, 9.0, "GoogleSansFlex");
-        render_text(scene, ctx.cache, ctx.font, &ps,
-            cx - pw / 2.0, by + STATUS_ICON_SIZE + 2.0, 9.0, c2c(bcol), "GoogleSansFlex");
+        let pw = text_width(cr, &ps, pct_size);
+        set_source_rgba(cr, bcol);
+        render_text(cr, cx - pw / 2.0, cy + icon_sz, &ps, pct_size, bcol);
     }
 }
 
-fn power_mod(scene: &mut Scene, _ctx: &mut RenderCtx, x: f32, y: f32, w: f32) {
-    let px = x + (w - MODULE_PILL_W) / 2.0;
-    let py = y + (MODULE_ITEM_H - MODULE_PILL_H) / 2.0;
-    draw_capsule(scene, px, py, MODULE_PILL_W, MODULE_PILL_H, C_POWER, RADIUS_FULL);
-    draw_power(scene, px + (MODULE_PILL_W - 16.0) / 2.0, py + (MODULE_PILL_H - 16.0) / 2.0, 16.0, C_WS_ACTIVE_TEXT);
+fn draw_power_btn(cr: &cairo::Context, x: f64, y: f64, w: f64, scale: f64) {
+    let sz = pwr_h() * scale;
+    let ix = x + (w - sz) / 2.0;
+    crate::render::draw_power(cr, ix, y, sz, C_POWER);
 }
 
-pub fn render_bar(state: &mut State) -> Scene {
-    let w = state.bar.w.max(1) as u32;
-    let h = state.bar.h.max(1) as u32;
+// ============================================================
+// Main render entry point
+// ============================================================
 
-    let mut scene = Scene::new();
-    let bar_w = w as f32;
-    let bar_h = h as f32;
-    let inner_x = PAD_XS;
-    let inner_w = BAR_INNER_W;
+pub fn render_bar(state: &mut State) {
+    let Some(ref mut shm_triple) = state.bar.shm else { return };
 
-    draw_capsule(&mut scene, 0.0, 0.0, bar_w, bar_h, C_BAR_BG, RADIUS_LG);
-    stroke_rounded_rect(&mut scene, 0.0, 0.0, bar_w, bar_h, RADIUS_LG, 1.5, color(C_BAR_BORDER));
+    // Snapshot values before borrowing slot
+    let scale = state.scale.max(1) as f64;
+    let bar_w = state.bar.w.max(1) as f64;
+    let bar_h = state.bar.h.max(1) as f64;
+    let clock = state.clock.clone();
+    let date = state.date.clone();
+    let status = state.status.clone();
+    let _hovered_ws = state.hovered_ws;
+    let shown_ws: Vec<_> = state.workspaces.iter().take(BAR_SHOWN_WORKSPACES).cloned().collect();
+    let ws_refs: Vec<(String, crate::state::Tag)> = shown_ws;
 
-    let mut ctx = RenderCtx {
-        cache: &mut state.font_cache,
-        font: &mut state.font,
-        clock: &state.clock,
-        date: &state.date,
-        volume_muted: state.status.volume_muted,
-        network_connected: state.status.network_connected,
-        battery: state.status.battery,
-        battery_charging: state.status.battery_charging,
-        hovered_ws: state.hovered_ws,
+    let slot = shm_triple.next_slot();
+
+    // Snapshot dimensions before borrowing slot's data
+    let width = slot.width;
+    let height = slot.height;
+    let stride = slot.stride;
+
+    // Create temporary Cairo surface backed by shm buffer memory
+    let data = unsafe { slot.data_mut() };
+    // Zero the buffer to prevent ghosting from previous frame
+    data.fill(0);
+    let surface = unsafe {
+        cairo::ImageSurface::create_for_data_unsafe(
+            data.as_mut_ptr(),
+            cairo::Format::ARgb32,
+            width,
+            height,
+            stride,
+        ).unwrap()
     };
+    let _ = data;
 
-    let n_ws = state.workspaces.len();
-    let os_h = MODULE_ITEM_H;
-    let ws_h = n_ws as f32 * WS_ITEM_H + (n_ws.saturating_sub(1)) as f32 * WS_SPACING;
-    let status_h = MODULE_ITEM_H * 3.0;
-    let clock_h = 54.0;
-    let power_h = MODULE_ITEM_H;
-    let fixed_h = os_h + ws_h + status_h + clock_h + power_h;
-    let avail_h = bar_h - PAD_LG * 2.0;
-    let top_spacer = ((avail_h - fixed_h) / 3.0).max(SPACE_SM);
-    let mid_spacer = top_spacer;
-    let bottom_flex = (avail_h - fixed_h - top_spacer - mid_spacer).max(SPACE_SM);
+    let cr = cairo::Context::new(&surface).unwrap();
 
-    let mut cy = PAD_LG;
+    // Clear to transparent
+    cr.set_operator(cairo::Operator::Clear);
+    let _ = cr.paint();
+    cr.set_operator(cairo::Operator::Over);
 
-    os_pill(&mut scene, &mut ctx, inner_x, cy, inner_w);
-    cy += os_h + top_spacer;
+    let module_w = BAR_INNER_W as f64 * scale;
+    let module_x = (bar_w - module_w) / 2.0;
 
-    ws_mod(&mut scene, &mut ctx, &state.workspaces, inner_x, cy, inner_w);
-    cy += ws_h + mid_spacer;
+    let content_h = total_content_h(&ws_refs) * scale;
+    let mut cy = ((bar_h - content_h) / 2.0).max(0.0);
 
-    status_mod(&mut scene, &mut ctx, inner_x, cy, inner_w);
-    cy += status_h + SPACE_XS;
+    draw_os(&cr, module_x, cy, module_w, scale);
+    cy += os_h() * scale + BAR_MODULE_SPACING as f64 * scale;
 
-    clock_mod(&mut scene, &mut ctx, inner_x, cy, inner_w);
-    cy += clock_h + bottom_flex;
+    if !ws_refs.is_empty() {
+        draw_ws(&cr, &ws_refs, module_x, cy, module_w, scale);
+        cy += ws_h(&ws_refs) * scale + BAR_MODULE_SPACING as f64 * scale;
+    }
 
-    power_mod(&mut scene, &mut ctx, inner_x, cy, inner_w);
+    draw_clock(&cr, &clock, &date, module_x, cy, module_w, scale);
+    cy += clk_h() * scale + BAR_MODULE_SPACING as f64 * scale;
 
-    state.bar.dirty = false;
-    scene
+    draw_status(&cr, &status, module_x, cy, module_w, scale);
+    cy += st_h() * scale + BAR_MODULE_SPACING as f64 * scale;
+
+    draw_power_btn(&cr, module_x, cy, module_w, scale);
+
+    surface.flush();
 }
 
+/// Hit-test workspace pills for pointer events.
 pub fn hit_test_workspace(state: &State, x: f64, y: f64) -> Option<usize> {
-    let bar_w = state.bar.w as f32;
-    let xf = x as f32;
-    let yf = y as f32;
-    if xf < 0.0 || xf > bar_w { return None; }
+    let scale = state.scale.max(1) as f64;
+    let bar_w = state.bar.w as f64;
+    let bar_h = state.bar.h as f64;
 
-    let item_x = PAD_XS + (BAR_INNER_W - WS_ITEM_W) / 2.0;
-    let n = state.workspaces.len();
-    let ws_h = n as f32 * WS_ITEM_H + (n.saturating_sub(1)) as f32 * WS_SPACING;
-    let os_h = MODULE_ITEM_H;
-    let status_h = MODULE_ITEM_H * 3.0;
-    let clock_h = 54.0;
-    let power_h = MODULE_ITEM_H;
-    let fixed_h = os_h + ws_h + status_h + clock_h + power_h;
-    let avail_h = state.bar.h as f32 - PAD_LG * 2.0;
-    let top_spacer = ((avail_h - fixed_h) / 3.0).max(SPACE_SM);
-    let ws_y = PAD_LG + os_h + top_spacer;
+    let module_w = BAR_INNER_W as f64 * scale;
+    let module_x = (bar_w - module_w) / 2.0;
 
-    let mut w_cy = ws_y;
-    for (i, _) in state.workspaces.iter().enumerate() {
-        if xf >= item_x && xf <= item_x + WS_ITEM_W
-            && yf >= w_cy && yf <= w_cy + WS_ITEM_H {
-            return Some(i);
+    let shown_ws: Vec<_> = state.workspaces.iter().take(BAR_SHOWN_WORKSPACES).cloned().collect();
+    if shown_ws.is_empty() { return None; }
+
+    let content_h = total_content_h(&shown_ws) * scale;
+    let base_y = ((bar_h - content_h) / 2.0).max(0.0);
+    let os = os_h() * scale;
+    let pill = ws_h(&shown_ws) * scale;
+    let ws_y = base_y + os + BAR_MODULE_SPACING as f64 * scale;
+    let item = WS_ITEM_H as f64 * scale;
+
+    if x >= module_x && x <= module_x + module_w && y >= ws_y && y <= ws_y + pill {
+        let content = shown_ws.len() as f64 * item + (shown_ws.len() as f64 - 1.0) * WS_SPACING as f64 * scale;
+        let pad = (pill - content) / 2.0;
+        let local = y - ws_y - pad;
+        if local >= 0.0 {
+            let idx = (local / (item + WS_SPACING as f64 * scale)) as usize;
+            if idx < shown_ws.len() {
+                let start = idx as f64 * (item + WS_SPACING as f64 * scale);
+                if local >= start && local <= start + item {
+                    return Some(idx);
+                }
+            }
         }
-        w_cy += WS_ITEM_H + WS_SPACING;
     }
     None
 }

@@ -1,7 +1,6 @@
 use std::fs;
-use std::io::{BufRead, BufReader};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SystemStatus {
     pub battery: Option<u8>,
     pub battery_charging: bool,
@@ -10,97 +9,31 @@ pub struct SystemStatus {
 }
 
 pub fn poll_status() -> SystemStatus {
+    let (battery, charging) = poll_battery();
     SystemStatus {
-        battery: poll_battery_percent(),
-        battery_charging: poll_battery_charging(),
+        battery,
+        battery_charging: charging,
         network_connected: poll_network(),
-        volume_muted: poll_volume_muted(),
+        volume_muted: poll_volume_zbus().unwrap_or(false),
     }
 }
 
-fn poll_battery_percent() -> Option<u8> {
+fn poll_battery() -> (Option<u8>, bool) {
     let base = "/sys/class/power_supply";
-    let dir = fs::read_dir(base).ok()?;
+    let Ok(dir) = fs::read_dir(base) else { return (None, false) };
     for entry in dir.flatten() {
         let name = entry.file_name();
         let n = name.to_string_lossy();
         if !n.starts_with("BAT") && !n.starts_with("bat") { continue }
-        let cap = entry.path().join("capacity");
-        let val = fs::read_to_string(&cap).ok()?;
-        return val.trim().parse::<u8>().ok();
+        let path = entry.path();
+        let cap = fs::read_to_string(path.join("capacity")).ok()
+            .and_then(|s| s.trim().parse::<u8>().ok());
+        let charging = fs::read_to_string(path.join("status")).ok()
+            .map(|s| s.trim() == "Charging")
+            .unwrap_or(false);
+        return (cap, charging);
     }
-    None
-}
-
-fn poll_battery_charging() -> bool {
-    let base = "/sys/class/power_supply";
-    let dir = fs::read_dir(base).ok();
-    let dir = match dir { Some(d) => d, None => return false };
-    for entry in dir.flatten() {
-        let name = entry.file_name();
-        let n = name.to_string_lossy();
-        if !n.starts_with("BAT") && !n.starts_with("bat") { continue }
-        let status_path = entry.path().join("status");
-        let val = match fs::read_to_string(&status_path) { Ok(s) => s, Err(_) => continue };
-        return val.trim() == "Charging";
-    }
-    false
-}
-
-#[allow(dead_code)]
-fn poll_cpu() -> u8 {
-    let Ok(content) = fs::read_to_string("/proc/stat") else { return 0 };
-    let Some(line) = content.lines().next() else { return 0 };
-    let parts: Vec<u64> = line.split_whitespace().skip(1).filter_map(|s| s.parse().ok()).collect();
-    if parts.len() < 4 { return 0 }
-    let total: u64 = parts.iter().sum();
-    let idle = parts[3];
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static PREV_TOTAL: AtomicU64 = AtomicU64::new(0);
-    static PREV_IDLE: AtomicU64 = AtomicU64::new(0);
-    let prev_total = PREV_TOTAL.swap(total, Ordering::Relaxed);
-    let prev_idle = PREV_IDLE.swap(idle, Ordering::Relaxed);
-    if prev_total == 0 || prev_idle == 0 { return 0 }
-    let dtotal = total.saturating_sub(prev_total);
-    let didle = idle.saturating_sub(prev_idle);
-    if dtotal == 0 { return 0 }
-    ((dtotal - didle) * 100 / dtotal) as u8
-}
-
-#[allow(dead_code)]
-fn poll_mem_percent() -> u8 {
-    let Ok(file) = fs::File::open("/proc/meminfo") else { return 0 };
-    let reader = BufReader::new(file);
-    let mut total = 0u64;
-    let mut available = 0u64;
-    for line in reader.lines().flatten() {
-        if line.starts_with("MemTotal:") {
-            if let Some(val) = line.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()) {
-                total = val;
-            }
-        } else if line.starts_with("MemAvailable:") {
-            if let Some(val) = line.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()) {
-                available = val;
-            }
-        }
-    }
-    if total == 0 { return 0 }
-    let used = total.saturating_sub(available);
-    (used * 100 / total) as u8
-}
-
-#[allow(dead_code)]
-fn poll_mem_total_gb() -> f32 {
-    let Ok(file) = fs::File::open("/proc/meminfo") else { return 0.0 };
-    let reader = BufReader::new(file);
-    for line in reader.lines().flatten() {
-        if line.starts_with("MemTotal:") {
-            if let Some(val) = line.split_whitespace().nth(1).and_then(|s| s.parse::<f32>().ok()) {
-                return val / (1024.0 * 1024.0);
-            }
-        }
-    }
-    0.0
+    (None, false)
 }
 
 fn poll_network() -> bool {
@@ -118,32 +51,35 @@ fn poll_network() -> bool {
     false
 }
 
-#[allow(dead_code)]
-fn poll_volume() -> u8 {
-    let out = std::process::Command::new("wpctl")
-        .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let s = s.trim().strip_prefix("Volume: ").unwrap_or(&s);
-            let s = s.split_whitespace().next().unwrap_or("0");
-            let vol: f32 = s.parse().unwrap_or(0.0);
-            (vol * 100.0) as u8
-        }
-        _ => 0,
-    }
-}
+/// Query PulseAudio default sink mute state via D-Bus.
+/// Returns `None` if PulseAudio D-Bus is unavailable (not running, no session bus).
+fn poll_volume_zbus() -> Option<bool> {
+    let conn = zbus::blocking::Connection::session().ok()?;
 
-fn poll_volume_muted() -> bool {
-    let out = std::process::Command::new("wpctl")
-        .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            s.contains("[MUTED]")
-        }
-        _ => false,
-    }
+    // Get the default sink name from PulseAudio's core interface
+    let server_info = conn.call_method(
+        Some("org.PulseAudio1"),
+        "/org/pulseaudio/core1",
+        Some("org.PulseAudio1.Core"),
+        "GetSinks",
+        &(),
+    ).ok()?;
+
+    let sinks: Vec<zbus::zvariant::OwnedObjectPath> = server_info.body().deserialize().ok()?;
+
+    // Use the first sink as the default
+    let path_str = sinks.first()?.to_string();
+
+    // Check the Mute property
+    let msg = conn.call_method(
+        Some("org.PulseAudio1"),
+        path_str.as_str(),
+        Some("org.freedesktop.DBus.Properties"),
+        "Get",
+        &("org.PulseAudio1.Sink", "Mute"),
+    ).ok()?;
+    let body = msg.body();
+    let prop: zbus::zvariant::Value = body.deserialize().ok()?;
+    let muted: bool = prop.downcast().ok()?;
+    Some(muted)
 }

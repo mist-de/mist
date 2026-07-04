@@ -1,17 +1,18 @@
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::FromRawFd;
-use std::os::unix::io::IntoRawFd;
+use std::os::unix::io::{FromRawFd, IntoRawFd};
 
-use std::ptr::NonNull;
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
 use wayland_client::globals::GlobalListContents;
+use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_keyboard::{KeyState, WlKeyboard};
+use wayland_client::protocol::wl_output::{Event as OutputEvent, WlOutput};
 use wayland_client::protocol::wl_pointer::{Axis, ButtonState, WlPointer};
 use wayland_client::protocol::wl_region::WlRegion;
 use wayland_client::protocol::wl_seat::WlSeat;
+use wayland_client::protocol::wl_shm::WlShm;
+use wayland_client::protocol::wl_shm_pool::WlShmPool;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1};
@@ -22,42 +23,18 @@ use xkbcommon::xkb::{self, keysyms};
 
 use crate::bar::{hit_test_workspace, render_bar};
 use crate::launcher;
-use crate::state::{BarCb, LauncherCb, State};
+use crate::state::{BarCb, LauncherCb, ShmTriple, State, SurfaceId};
 
-fn create_wgpu_surface(state: &State, wl_surface: &WlSurface, w: u32, h: u32) -> Option<(wgpu::Surface<'static>, wgpu::TextureFormat)> {
-    let raw_display = {
-        let ptr = state.conn.backend().display_id().as_ptr() as *mut std::ffi::c_void;
-        RawDisplayHandle::Wayland(WaylandDisplayHandle::new(NonNull::new(ptr)?))
-    };
-    let raw_window = {
-        let ptr = wl_surface.id().as_ptr() as *mut std::ffi::c_void;
-        RawWindowHandle::Wayland(WaylandWindowHandle::new(NonNull::new(ptr)?))
-    };
-    let wgpu_surface = unsafe {
-        state.gpu_instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(raw_display),
-            raw_window_handle: raw_window,
-        })
-    }.ok()?;
-    let adapter = pollster::block_on(state.gpu_instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::LowPower,
-        compatible_surface: Some(&wgpu_surface),
-        force_fallback_adapter: false,
-    })).ok()?;
-    let format = wgpu_surface.get_capabilities(&adapter).formats.into_iter()
-        .find(|f| *f == wgpu::TextureFormat::Rgba8Unorm)
-        .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
-    wgpu_surface.configure(&state.gpu_device, &wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
-        width: w.max(1),
-        height: h.max(1),
-        present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
-        view_formats: vec![],
-        desired_maximum_frame_latency: 1,
-    });
-    Some((wgpu_surface, format))
+fn create_bar_shm(state: &mut State) {
+    let w = state.bar.w.max(1);
+    let h = state.bar.h.max(1);
+    state.bar.shm = ShmTriple::create(3, w, h, &state.shm, &state.qh, SurfaceId::Bar);
+}
+
+fn create_launcher_shm(state: &mut State) {
+    let w = state.launcher.w.max(1);
+    let h = state.launcher.h.max(1);
+    state.launcher.shm = ShmTriple::create(3, w, h, &state.shm, &state.qh, SurfaceId::Launcher);
 }
 
 impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
@@ -66,55 +43,54 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
             zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
                 if proxy.id() == state.bar.layer.id() {
                     proxy.ack_configure(serial);
-                    state.bar.w = width.max(1) as i32;
-                    state.bar.h = height.max(1) as i32;
-                    state.bar.configured = true;
-                    if let Some(ref surface) = state.bar.wgpu_surface {
-                        surface.configure(&state.gpu_device, &wgpu::SurfaceConfiguration {
-                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                            format: state.bar.surface_format,
-                            width: state.bar.w as u32,
-                            height: state.bar.h as u32,
-                            present_mode: wgpu::PresentMode::Fifo,
-                            alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
-                            view_formats: vec![],
-                            desired_maximum_frame_latency: 1,
-                        });
+                    let scale = state.scale.max(1);
+                    let buf_w = width.max(1) as i32 * scale;
+                    let buf_h = height.max(1) as i32 * scale;
+                    state.bar.surface.set_buffer_scale(scale);
+
+                    if state.bar.w != buf_w || state.bar.h != buf_h {
+                        state.bar.w = buf_w;
+                        state.bar.h = buf_h;
+                        if let Some(ref mut shm) = state.bar.shm {
+                            shm.recreate_all(buf_w, buf_h, &state.shm, &state.qh, SurfaceId::Bar);
+                        } else {
+                            create_bar_shm(state);
+                        }
+                    } else if state.bar.shm.is_none() {
+                        create_bar_shm(state);
                     }
-                    let scene = render_bar(state);
-                    state.commit_bar(scene);
+
+                    state.bar.configured = true;
+                    render_bar(state);
+                    state.commit_bar();
                 } else if let Some(ref l) = state.launcher.layer
                     && proxy.id() == l.id() {
                     proxy.ack_configure(serial);
+                    let scale = state.scale.max(1);
                     let w = if width > 0 { width as i32 } else { 1920 };
                     let h = if height > 0 { height as i32 } else { 1080 };
-                    state.launcher.w = w;
-                    state.launcher.h = h;
-                    state.launcher.configured = true;
-
-                    if state.launcher.wgpu_surface.is_none() {
-                        if let Some(ref wl_surface) = state.launcher.surface {
-                            if let Some((s, fmt)) = create_wgpu_surface(state, wl_surface, w as u32, h as u32) {
-                                state.launcher.wgpu_surface = Some(s);
-                                state.launcher.surface_format = fmt;
-                            }
-                        }
-                    } else if let Some(ref wgpu_surface) = state.launcher.wgpu_surface {
-                        wgpu_surface.configure(&state.gpu_device, &wgpu::SurfaceConfiguration {
-                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                            format: state.launcher.surface_format,
-                            width: w as u32,
-                            height: h as u32,
-                            present_mode: wgpu::PresentMode::Fifo,
-                            alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
-                            view_formats: vec![],
-                            desired_maximum_frame_latency: 1,
-                        });
+                    let buf_w = w * scale;
+                    let buf_h = h * scale;
+                    if let Some(ref surface) = state.launcher.surface {
+                        surface.set_buffer_scale(scale);
                     }
 
-                    let (scene, panel) = launcher::render_launcher(state);
+                    if state.launcher.w != buf_w || state.launcher.h != buf_h {
+                        state.launcher.w = buf_w;
+                        state.launcher.h = buf_h;
+                        if let Some(ref mut shm) = state.launcher.shm {
+                            shm.recreate_all(buf_w, buf_h, &state.shm, &state.qh, SurfaceId::Launcher);
+                        } else {
+                            create_launcher_shm(state);
+                        }
+                    } else if state.launcher.shm.is_none() {
+                        create_launcher_shm(state);
+                    }
+
+                    state.launcher.configured = true;
+                    let (_data, panel) = launcher::render_launcher(state);
                     state.launcher.panel = Some(panel);
-                    state.commit_launcher(scene);
+                    state.commit_launcher();
                 }
             }
             zwlr_layer_surface_v1::Event::Closed
@@ -135,8 +111,8 @@ impl Dispatch<WlCallback, BarCb> for State {
         if let wayland_client::protocol::wl_callback::Event::Done { .. } = event {
             state.bar.frame_pending = false;
             if state.bar.dirty && state.bar.configured {
-                let scene = render_bar(state);
-                state.commit_bar(scene);
+                render_bar(state);
+                state.commit_bar();
             }
         }
     }
@@ -163,6 +139,15 @@ impl Dispatch<WlCompositor, ()> for State {
     fn event(_: &mut Self, _: &WlCompositor, _: <WlCompositor as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
+impl Dispatch<WlOutput, ()> for State {
+    fn event(state: &mut Self, _proxy: &WlOutput, event: <WlOutput as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let OutputEvent::Scale { factor } = event {
+            state.scale = factor;
+            state.bar.dirty = true;
+        }
+    }
+}
+
 impl Dispatch<WlRegion, ()> for State {
     fn event(_: &mut Self, _: &WlRegion, _: <WlRegion as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
@@ -173,6 +158,26 @@ impl Dispatch<WlSurface, ()> for State {
 
 impl Dispatch<ZwlrLayerShellV1, ()> for State {
     fn event(_: &mut Self, _: &ZwlrLayerShellV1, _: <ZwlrLayerShellV1 as wayland_client::Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlShm, ()> for State {
+    fn event(_: &mut Self, _: &WlShm, _: <WlShm as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlShmPool, ()> for State {
+    fn event(_: &mut Self, _: &WlShmPool, _: <WlShmPool as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+// wl_buffer release events: route to bar or launcher based on SurfaceId user data
+impl Dispatch<WlBuffer, SurfaceId> for State {
+    fn event(state: &mut Self, proxy: &WlBuffer, event: <WlBuffer as Proxy>::Event, ud: &SurfaceId, _: &Connection, _: &QueueHandle<Self>) {
+        if let wayland_client::protocol::wl_buffer::Event::Release = event {
+            match ud {
+                SurfaceId::Bar => state.mark_bar_buffer_released(proxy.id()),
+                SurfaceId::Launcher => state.mark_launcher_buffer_released(proxy.id()),
+            }
+        }
+    }
 }
 
 impl Dispatch<WlSeat, ()> for State {
@@ -248,8 +253,8 @@ impl Dispatch<WlKeyboard, ()> for State {
                         }
                         state.hide_launcher();
                     } else if state.launcher.view == crate::launcher::LauncherView::ActionList {
-                        if let Some(&act_idx) = state.launcher.matching_actions.get(state.launcher.selection) {
-                            if let Some(act) = state.launcher.actions.get(act_idx) {
+                        if let Some(&act_idx) = state.launcher.matching_actions.get(state.launcher.selection)
+                            && let Some(act) = state.launcher.actions.get(act_idx) {
                                 if act.command.first().copied() == Some("autocomplete") {
                                     if let Some(cmd) = act.command.get(1) {
                                         state.launcher.query = format!(">{} ", cmd);
@@ -264,10 +269,9 @@ impl Dispatch<WlKeyboard, ()> for State {
                                     if !exec.is_empty() { crate::launcher::launch_app(&exec); }
                                     state.hide_launcher();
                                 }
+                            } else {
+                                state.hide_launcher();
                             }
-                        } else {
-                            state.hide_launcher();
-                        }
                     } else {
                         if let Some(&idx) = state.launcher.matching.get(state.launcher.selection)
                             && let Some(app) = state.launcher.apps.get(idx) {
@@ -316,7 +320,6 @@ impl Dispatch<WlKeyboard, ()> for State {
 }
 
 fn in_search_bar(px: f32, py: f32, pw: f32, ph: f32, sx: f32, sy: f32) -> bool {
-    // compute_panel with anim_scale=1.0 since we're just checking hit targets
     let pad = 12.0;
     let search_h = 42.0;
     let search_x = px + pad;
@@ -374,8 +377,8 @@ impl Dispatch<WlPointer, ()> for State {
                     state.hovered_ws = None;
                     state.bar.dirty = true;
                     if state.bar.configured && !state.bar.frame_pending {
-                        let scene = render_bar(state);
-                        state.commit_bar(scene);
+                        render_bar(state);
+                        state.commit_bar();
                     }
                 }
             }
@@ -389,11 +392,9 @@ impl Dispatch<WlPointer, ()> for State {
                         if state.launcher.configured {
                             if let Some((px, py, pw, ph)) = state.launcher.panel {
                                 let (sx, sy) = (state.pointer_x as f32, state.pointer_y as f32);
-                                if std::env::var("MIST_DEBUG").map(|v| v == "1").unwrap_or(false) { eprintln!("[mist] click sx={:.1} sy={:.1} panel=({:.0},{:.0} {:.0}x{:.0})", sx, sy, px, py, pw, ph); }
                                 if sx >= px && sx <= px + pw && sy >= py && sy <= py + ph {
                                     let lay = crate::launcher::compute_panel(state.launcher.w as f32, state.launcher.h as f32, 1.0);
                                     let rel_y = sy - lay.start_y;
-                                    if std::env::var("MIST_DEBUG").map(|v| v == "1").unwrap_or(false) { eprintln!("[mist] click in panel rel_y={:.1} div_y={:.1} max_visible={}", rel_y, lay.div_y, lay.max_visible); }
                                     if rel_y >= 0.0 && sy < lay.div_y {
                                         let row = (rel_y / lay.item_h) as usize;
                                         if row < lay.max_visible {
@@ -425,10 +426,8 @@ impl Dispatch<WlPointer, ()> for State {
                                                 }
                                         }
                                     }
-                                    if std::env::var("MIST_DEBUG").map(|v| v == "1").unwrap_or(false) { eprintln!("[mist] click in panel, no item — keep open"); }
                                     return;
                                 }
-                                if std::env::var("MIST_DEBUG").map(|v| v == "1").unwrap_or(false) { eprintln!("[mist] click outside panel — dismiss"); }
                             }
                         }
                         state.hide_launcher();
@@ -442,8 +441,8 @@ impl Dispatch<WlPointer, ()> for State {
                             }
                             state.bar.dirty = true;
                             if state.bar.configured {
-                                let scene = render_bar(state);
-                                state.commit_bar(scene);
+                                render_bar(state);
+                                state.commit_bar();
                             }
                             crate::compositor::focus_workspace(state.compositor_type, &ws_name);
                         }
@@ -472,8 +471,8 @@ impl Dispatch<WlPointer, ()> for State {
                         if let Some((_, tag)) = state.workspaces.get_mut(new_idx) { tag.active = true; }
                         state.bar.dirty = true;
                         if state.bar.configured && !state.bar.frame_pending {
-                            let scene = render_bar(state);
-                            state.commit_bar(scene);
+                            render_bar(state);
+                            state.commit_bar();
                         }
                         if let Some(ref name) = ws_name {
                             crate::compositor::focus_workspace(state.compositor_type, name);
@@ -492,8 +491,8 @@ fn update_hover(state: &mut State) {
     if old != state.hovered_ws {
         state.bar.dirty = true;
         if state.bar.configured && !state.bar.frame_pending {
-            let scene = render_bar(state);
-            state.commit_bar(scene);
+            render_bar(state);
+            state.commit_bar();
         }
     }
 }
