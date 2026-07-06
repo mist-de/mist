@@ -70,29 +70,6 @@ zig build -Doptimize=ReleaseFast -- -lwayland-client -lxkbcommon -lfreetype -lha
 
 </details>
 
-## Repository
-
-```
-src/
-├── main.zig     — entry point, registry sync, poll loop
-├── bar.zig      — bar layout, draw, widgets
-├── wl.zig       — Wayland context, layer surface, shm buffer
-├── render.zig   — Canvas software renderer (ARGB8888)
-├── config.zig   — hardcoded Catppuccin Mocha colors
-├── seat.zig     — pointer / keyboard event stubs
-├── output.zig   — per-output bar lifecycle
-├── geometry.zig — Point, Rect, Size
-├── color.zig    — Color with ARGB pixel conversion
-├── util.zig     — BoundedArray generic
-├── mpris.zig    — MPRIS D-Bus client via basu
-├── basu_c.zig   — basu C bindings (@cImport)
-├── c.zig        — FreeType + HarfBuzz C bindings (@cImport)
-├── tr.h         — FreeType + HarfBuzz C headers
-├── basu.h       — basu C header
-fonts/           — bundled Inter, NotoSans NF, JetBrainsMono NF, Material Symbols
-build.zig        — wayland protocol scanner
-```
-
 ## Compositor Support
 
 Requires `wlr-layer-shell`, `ext-workspace-v1`, and `zwlr-foreign-toplevel-management-v1`. Only tested on:
