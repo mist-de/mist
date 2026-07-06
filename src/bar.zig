@@ -663,12 +663,6 @@ fn keyboardListener(kb: *wl.Keyboard, event: wl.Keyboard.Event, ctx: *Context) v
 }
 
 fn handleClick(ctx: *Context, x: i32, y: i32, button: u32) void {
-    std.log.info("click x={d} y={d} btn=0x{x} media=[{d},{d}) icon=[{d},{d}) mpris={any}", .{
-        x, y, button,
-        ctx.media_area_x0, ctx.media_area_x1,
-        ctx.media_icon_x0, ctx.media_icon_x1,
-        ctx.mpris,
-    });
     const bar_h: i32 = 40;
     const bar_w: i32 = ctx.outputs[0].mode_w;
     const screenRounding: i32 = 23;
