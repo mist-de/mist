@@ -105,4 +105,3 @@ MangoWM users: workspace clicks switch tags, window title clicks activate window
 
 Bundled in `fonts/`: Inter, NotoSans Nerd Font, JetBrains Mono Nerd Font, Material Symbols Rounded.
 
-<details>
