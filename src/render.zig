@@ -348,7 +348,11 @@ pub const Canvas = struct {
                     const angle = std.math.atan2(-dy, dx);
                     var a = angle - start_angle;
                     if (a < 0) a += std.math.tau;
-                    if (a > sweep_angle) coverage = 0;
+                    if (sweep_angle < 0) {
+                        if (a < std.math.tau + sweep_angle) coverage = 0;
+                    } else {
+                        if (a > sweep_angle) coverage = 0;
+                    }
                 }
 
                 if (coverage == 0) continue;

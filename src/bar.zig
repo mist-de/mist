@@ -194,7 +194,6 @@ pub const Bar = struct {
         const colSecondaryContainer = Color.rgba(0x4d, 0x4b, 0x4d, 0x99); // end-4: transparentize(0.4) = 60% opaque
         const colOnSecondaryContainer = Color.rgba(0xec, 0xe6, 0xe9, 0xFF);
         const colOutline = Color.rgba(0x94, 0x8f, 0x94, 0xFF);
-        const colOutlineVariant = Color.rgba(0x49, 0x46, 0x4a, 0xFF);
         const colSubtext = colOutline;
 
         // ═══ Layout Constants (end-4 Appearance.qml) ═══
@@ -293,10 +292,10 @@ pub const Bar = struct {
         for (resIcons, 0..) |icon, ri| {
             const ringR: i32 = 10;
             const ringCX: i32 = resX + ringR;
-            // Track ring: colOnSecondaryContainer at 50% alpha (end-4 transparentize 0.5)
-            canvas.fillRing(ringCX, centerY, 8, ringR, Color.rgba(0xec, 0xe6, 0xe9, 0x80));
-            // Progress arc: ~52% (placeholder)
-            canvas.fillArc(ringCX, centerY, 8, ringR, -half_pi, two_pi * 0.52, colOnSecondaryContainer);
+            // Track: filled circle at 50% alpha (end-4 transparentize colPrimary, 0.5)
+            canvas.fillCircle(ringCX, centerY, ringR, Color.rgba(0xec, 0xe6, 0xe9, 0x80));
+            // Progress: filled sector from center, clockwise from top (end-4 ClippedFilledCircularProgress)
+            canvas.fillArc(ringCX, centerY, 0, ringR, half_pi, -two_pi * 0.52, colOnSecondaryContainer);
 
             // Icon centered in 20x20 ring at 16px (end-4 MaterialSymbol normal)
             if (self.font_material) |*fMat| {
@@ -320,8 +319,8 @@ pub const Bar = struct {
             resX += 6;
             const mediaRingCX: i32 = resX + 10;
             const mediaProgress: f32 = 0.42; // placeholder: 42% progress
-            canvas.fillArc(mediaRingCX, centerY, 8, 10, -half_pi, two_pi, colOutlineVariant);
-            canvas.fillArc(mediaRingCX, centerY, 8, 10, -half_pi, two_pi * mediaProgress, colOnSecondaryContainer);
+            canvas.fillCircle(mediaRingCX, centerY, 10, Color.rgba(0xec, 0xe6, 0xe9, 0x80));
+            canvas.fillArc(mediaRingCX, centerY, 0, 10, half_pi, -two_pi * mediaProgress, colOnSecondaryContainer);
 
             if (self.font_material) |*fMat| {
                 const tbl = @divTrunc(bar_h - fMat.lineHeight(), 2) + fMat.baselineOffset();
