@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 
 const Context = @import("wl.zig").Context;
-const seat = @import("seat.zig");
+const input = @import("input.zig");
 const output_mod = @import("output.zig");
 const config_mod = @import("config.zig");
 
@@ -18,7 +18,7 @@ pub fn main() !void {
     defer ctx.deinit();
 
     if (ctx.seat) |s| {
-        s.setListener(*Context, seat.seatListener, &ctx);
+        s.setListener(*Context, input.seatListener, &ctx);
     }
 
     ctx.roundtrip();

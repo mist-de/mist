@@ -8,10 +8,10 @@ const LayerSurface = @import("wl.zig").LayerSurface;
 const ShmBuffer = @import("wl.zig").ShmBuffer;
 const Canvas = @import("render.zig").Canvas;
 const config_mod = @import("config.zig");
-const geometry = @import("geometry.zig");
-const Color = @import("color.zig").Color;
-const Rect = geometry.Rect;
-const Font = @import("font.zig").Font;
+const Color = config_mod.Color;
+const Appearance = config_mod.Appearance;
+const Rect = config_mod.Rect;
+const Font = @import("text.zig").Font;
 const text_mod = @import("text.zig");
 
 pub const Bar = struct {

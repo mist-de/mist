@@ -1,5 +1,5 @@
 const std = @import("std");
-const Color = @import("color.zig").Color;
+const Color = @import("config.zig").Color;
 
 pub const Canvas = struct {
     data: []align(std.heap.page_size_min) u8,

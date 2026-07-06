@@ -5,8 +5,8 @@ const zwlr = wayland.client.zwlr;
 const wp = wayland.client.wp;
 const ext = wayland.client.ext;
 
-const Rect = @import("geometry.zig").Rect;
-const color = @import("color.zig");
+const Rect = @import("config.zig").Rect;
+const Color = @import("config.zig").Color;
 
 pub const CursorShape = wp.CursorShapeDeviceV1.Shape;
 
