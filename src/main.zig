@@ -29,7 +29,7 @@ pub fn main() !void {
         std.log.warn("mpris init: {s}", .{@errorName(err)});
         break :blk mpris_mod.MprisPlayer{};
     };
-    mpris.tick();
+    mpris.query();
     ctx.mpris = &mpris;
 
     for (0..ctx.output_count) |i| {
@@ -42,11 +42,9 @@ pub fn main() !void {
     bar_mod.drawOutputs(&ctx, &mpris);
 
     const wayland_fd = ctx.getFd();
+    var mpris_tick: u32 = 0;
 
     while (ctx.running) {
-        // Process D-Bus MPRIS events
-        mpris.tick();
-
         const dbus_fd = mpris.getFd();
         var fds: [2]posix.pollfd = undefined;
         fds[0] = .{ .fd = wayland_fd, .events = posix.POLL.IN, .revents = 0 };
@@ -69,6 +67,13 @@ pub fn main() !void {
 
         if (dbus_fd >= 0 and fds[1].revents & posix.POLL.IN != 0) {
             mpris.process();
+        }
+
+        // Periodic MPRIS re-query (~1s at 100ms poll intervals)
+        mpris_tick += 1;
+        if (mpris_tick >= 10) {
+            mpris_tick = 0;
+            mpris.query();
         }
 
         // Periodic resource update (~3s at 100ms poll intervals)

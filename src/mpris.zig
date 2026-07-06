@@ -50,11 +50,6 @@ pub const MprisPlayer = struct {
         }
     }
 
-    pub fn tick(self: *MprisPlayer) void {
-        self.process();
-        self.query();
-    }
-
     pub fn query(self: *MprisPlayer) void {
         const b = self.bus orelse return;
         const pname = self.findPlayer(b) orelse {
