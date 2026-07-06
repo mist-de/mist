@@ -678,16 +678,16 @@ fn handleClick(ctx: *Context, x: i32, y: i32, button: u32) void {
     const wsCellX: i32 = mcX + wsBarGroupPadding;
     const wsY: i32 = centerY - @divTrunc(wsBtnWidth, 2);
 
-    // Media player controls (end-4: left=playPause, right/forward=next, back=prev)
+    // Media player controls (end-4: middle=playPause, right/forward=next, back=prev, left=mediaControls)
     if (x >= ctx.media_area_x0 and x < ctx.media_area_x1 and y >= 0 and y < bar_h) {
         if (ctx.mpris) |mpris| {
-            if (button == 0x110) { // BTN_LEFT
+            if (button == 0x112) { // BTN_MIDDLE → play/pause
                 mpris.playPause();
-            } else if (button == 0x111 or button == 0x117) { // BTN_RIGHT or BTN_FORWARD
+            } else if (button == 0x111 or button == 0x115) { // BTN_RIGHT or BTN_FORWARD → next
                 mpris.next();
-            } else if (button == 0x116) { // BTN_BACK
+            } else if (button == 0x116) { // BTN_BACK → previous
                 mpris.previous();
-            }
+            } // BTN_LEFT (0x110) is reserved for media controls popup (end-4: GlobalStates.mediaControlsOpen)
         }
         return;
     }
