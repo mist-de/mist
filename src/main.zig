@@ -43,6 +43,11 @@ pub fn main() !void {
     ctx.roundtrip();
     bar_mod.drawOutputs(&ctx, &mpris);
 
+    // Initialize media controls popup (hidden off-screen until shown)
+    ctx.media_popup.init(&ctx, 0, allocator) catch |err| {
+        std.log.warn("media popup init: {s}", .{@errorName(err)});
+    };
+
     const wayland_fd = ctx.getFd();
     var mpris_tick: u32 = 0;
 
@@ -89,6 +94,7 @@ pub fn main() !void {
         // Redraw when workspace/toplevel state changed
         if (mpris.changed) {
             ctx.bar_dirty = true;
+            ctx.media_popup.markDirty();
             mpris.changed = false;
         }
         if (ctx.bar_dirty) {
@@ -96,6 +102,13 @@ pub fn main() !void {
             ctx.bar_dirty = false;
         }
         bar_mod.drawOutputs(&ctx, &mpris);
+
+        // Draw media controls popup if visible (only commits when needs_redraw)
+        if (ctx.media_popup.visible) {
+            const was_dirty = ctx.media_popup.needs_redraw;
+            ctx.media_popup.draw(&ctx);
+            if (was_dirty) ctx.media_popup.commit(&ctx);
+        }
     }
 
     mpris.deinit();

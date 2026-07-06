@@ -13,6 +13,7 @@ pub const MprisPlayer = struct {
     name: [:0]const u8 = "",
     title: [:0]const u8 = "",
     artist: [:0]const u8 = "",
+    art_url: [:0]const u8 = "",
     status: PlaybackStatus = .stopped,
     position: i64 = 0,
     length: i64 = 0,
@@ -21,6 +22,7 @@ pub const MprisPlayer = struct {
 
     title_buf: [256]u8 = undefined,
     artist_buf: [256]u8 = undefined,
+    art_url_buf: [1024]u8 = undefined,
 
     pub fn init() !MprisPlayer {
         var b: ?*bc.sd_bus = null;
@@ -166,6 +168,7 @@ pub const MprisPlayer = struct {
         var has_title = false;
         var has_artist = false;
         var has_length = false;
+        var has_art_url = false;
 
         while (true) {
             rrc = bc.sd_bus_message_enter_container(m, 'e', "sv");
@@ -237,11 +240,32 @@ pub const MprisPlayer = struct {
                     break :blk true;
                 }
                 break :blk false;
-            } else if (std.mem.eql(u8, ks, "mpris:length") and vt == 'x') blk: {
-                var val: i64 = 0;
-                if (bc.sd_bus_message_read(m, "x", &val) > 0) {
-                    self.length = val;
-                    has_length = true;
+            } else if (std.mem.eql(u8, ks, "mpris:length") and (vt == 'x' or vt == 't')) blk: {
+                if (vt == 'x') {
+                    var val: i64 = 0;
+                    if (bc.sd_bus_message_read(m, "x", &val) > 0) {
+                        self.length = val;
+                        has_length = true;
+                        break :blk true;
+                    }
+                } else {
+                    var val: u64 = 0;
+                    if (bc.sd_bus_message_read(m, "t", &val) > 0) {
+                        self.length = @as(i64, @intCast(val));
+                        has_length = true;
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            } else if (std.mem.eql(u8, ks, "mpris:artUrl") and vt == 's') blk: {
+                var val: [*:0]const u8 = undefined;
+                if (bc.sd_bus_message_read(m, "s", &val) > 0) {
+                    const vs = std.mem.span(val);
+                    const len = @min(vs.len, self.art_url_buf.len - 1);
+                    @memcpy(self.art_url_buf[0..len], vs[0..len]);
+                    self.art_url_buf[len] = 0;
+                    self.art_url = self.art_url_buf[0..len :0];
+                    has_art_url = true;
                     break :blk true;
                 }
                 break :blk false;
@@ -256,7 +280,7 @@ pub const MprisPlayer = struct {
         }
         _ = bc.sd_bus_message_exit_container(m); // array
 
-        if (has_title or has_artist or has_length) self.changed = true;
+        if (has_title or has_artist or has_length or has_art_url) self.changed = true;
     }
 
     pub fn playPause(self: *MprisPlayer) void {

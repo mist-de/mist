@@ -13,6 +13,8 @@ const Font = render_mod.Font;
 const config_mod = @import("config.zig");
 const Color = config_mod.Color;
 const mpris_mod = @import("mpris.zig");
+const media_popup_mod = @import("media_popup.zig");
+const MediaPopup = media_popup_mod.MediaPopup;
 const Appearance = config_mod.Appearance;
 const Rect = config_mod.Rect;
 
@@ -632,6 +634,7 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
     switch (event) {
         .enter => |enter| {
             ctx.last_enter_serial = enter.serial;
+            ctx.last_enter_surface = enter.surface;
             ctx.pointer_x = enter.surface_x.toInt();
             ctx.pointer_y = enter.surface_y.toInt();
             setCursorShape(ctx, enter.serial, .default);
@@ -642,7 +645,14 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
         },
         .button => |btn| {
             if (btn.state == .pressed) {
-                handleClick(ctx, ctx.pointer_x, ctx.pointer_y, btn.button);
+                const on_popup = ctx.popup_surface != null and ctx.last_enter_surface == ctx.popup_surface;
+                if (on_popup) {
+                    if (ctx.mpris) |mpris| {
+                        ctx.media_popup.handleClick(ctx.pointer_x, ctx.pointer_y, btn.button, mpris);
+                    }
+                } else {
+                    handleClick(ctx, ctx.pointer_x, ctx.pointer_y, btn.button);
+                }
             }
         },
         .leave => {
@@ -681,10 +691,18 @@ fn handleClick(ctx: *Context, x: i32, y: i32, button: u32) void {
     const wsCellX: i32 = mcX + wsBarGroupPadding;
     const wsY: i32 = centerY - @divTrunc(wsBtnWidth, 2);
 
-    // Media player controls (end-4: left=mediaControls, middle=playPause, right/forward=next, back=prev)
-    if (x >= ctx.media_area_x0 and x < ctx.media_area_x1 and y >= 0 and y < bar_h) {
+    // Dismiss popup on click outside media area (end-4: click anywhere else closes media controls)
+    const on_media = x >= ctx.media_area_x0 and x < ctx.media_area_x1 and y >= 0 and y < bar_h;
+    if (!on_media and ctx.popup_surface != null) {
+        ctx.media_popup.hide(ctx);
+    }
+
+    // Media player controls (end-4: left=mediaControls popup, middle=playPause, right/forward=next, back=prev)
+    if (on_media) {
         if (ctx.mpris) |mpris| {
-            if (button == 0x110 or button == 0x112) { // BTN_LEFT or BTN_MIDDLE → play/pause
+            if (button == 0x110) { // BTN_LEFT → toggle media controls popup
+                ctx.media_popup.toggle(ctx);
+            } else if (button == 0x112) { // BTN_MIDDLE → play/pause
                 mpris.playPause();
             } else if (button == 0x111 or button == 0x115) { // BTN_RIGHT or BTN_FORWARD → next
                 mpris.next();

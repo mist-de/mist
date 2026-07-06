@@ -9,6 +9,7 @@ const Rect = @import("config.zig").Rect;
 const Color = @import("config.zig").Color;
 const ResourceState = @import("config.zig").ResourceState;
 const mpris_mod = @import("mpris.zig");
+const MediaPopup = @import("media_popup.zig").MediaPopup;
 
 pub const CursorShape = wp.CursorShapeDeviceV1.Shape;
 
@@ -89,10 +90,12 @@ pub const Context = struct {
 
     last_motion_output: OutputIndex = .none,
     last_enter_serial: u32 = 0,
+    last_enter_surface: ?*wl.Surface = null,
     last_cursor_shape: ?CursorShape = null,
-    pointer_over_popup: bool = false,
     pointer_x: i32 = 0,
     pointer_y: i32 = 0,
+    /// Set to the popup's wl_surface when media controls popup is visible
+    popup_surface: ?*wl.Surface = null,
 
     toplevels: [max_toplevels]ToplevelInfo = undefined,
     toplevel_count: usize = 0,
@@ -106,6 +109,9 @@ pub const Context = struct {
     bar_dirty: bool = false,
     resources: ResourceState = .{},
     resource_counter: u32 = 0,
+
+    /// Media controls popup (toggled by left-click on media widget)
+    media_popup: MediaPopup = .{},
 
     /// MPRIS player reference for click dispatch
     mpris: ?*mpris_mod.MprisPlayer = null,
