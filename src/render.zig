@@ -236,10 +236,9 @@ pub const Canvas = struct {
         const y1 = @min(self.height, y + @as(i32, @intCast(h)));
         if (x0 >= x1 or y0 >= y1) return;
 
-        const dx = x0 - x;
         var row: i32 = y0;
         while (row < y1) : (row += 1) {
-            const src_row = @as(usize, @intCast((row - y) * pitch + dx));
+            const src_row = @as(usize, @intCast((row - y) * pitch));
             var col: i32 = x0;
             while (col < x1) : (col += 1) {
                 const src_col = @as(usize, @intCast(col - x));

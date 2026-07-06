@@ -79,12 +79,9 @@ pub const Font = struct {
         _ = c.FT_Done_FreeType(f.ft_lib);
     }
 
-    pub fn getGlyph(f: *Font, codepoint: u32) !*const Glyph {
-        const gop = try f.cache.getOrPut(f.allocator, codepoint);
+    pub fn getGlyph(f: *Font, glyph_index: u32) !*const Glyph {
+        const gop = try f.cache.getOrPut(f.allocator, glyph_index);
         if (gop.found_existing) return gop.value_ptr;
-
-        const glyph_index = c.FT_Get_Char_Index(f.ft_face, codepoint);
-        if (glyph_index == 0) return error.GlyphNotFound;
 
         if (c.FT_Load_Glyph(f.ft_face, glyph_index, c.FT_LOAD_RENDER) != 0) {
             return error.GlyphRenderFailed;
@@ -127,22 +124,10 @@ pub const Font = struct {
 // Text shaping + rendering (HarfBuzz)
 // ═══════════════════════════════════════════════════════════
 
-fn utf8ToCodepoints(text: []const u8, buf: []u32) usize {
-    var i: usize = 0;
-    var it = (std.unicode.Utf8View.init(text) catch return 0).iterator();
-    while (it.nextCodepoint()) |cp| : (i += 1) {
-        if (i >= buf.len) return i;
-        buf[i] = cp;
-    }
-    return i;
-}
-
 fn shape(font: *Font, text: []const u8, count: *c_uint) struct { [*c]c.hb_glyph_info_t, [*c]c.hb_glyph_position_t } {
-    var buf: [256]u32 = undefined;
-    const len = utf8ToCodepoints(text, &buf);
     c.hb_buffer_reset(font.hb_buf);
-    if (len > 0) {
-        c.hb_buffer_add_utf32(font.hb_buf, &buf, @intCast(len), 0, @intCast(len));
+    if (text.len > 0) {
+        c.hb_buffer_add_utf8(font.hb_buf, text.ptr, @intCast(text.len), 0, @intCast(text.len));
     }
     c.hb_buffer_set_direction(font.hb_buf, c.HB_DIRECTION_LTR);
     c.hb_buffer_set_script(font.hb_buf, c.HB_SCRIPT_LATIN);
