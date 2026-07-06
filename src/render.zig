@@ -33,15 +33,6 @@ pub const Canvas = struct {
         return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
     }
 
-    fn coverageAA(dist: u32, r_u: u32, band: u32) u32 {
-        if (dist <= r_u -| band) return 255;
-        if (dist >= r_u + band) return 0;
-        const delta = dist - (r_u -| band);
-        const t = @as(f32, @floatFromInt(delta)) / @as(f32, @floatFromInt(band * 2));
-        const smooth = t * t * (3.0 - 2.0 * t);
-        return @intFromFloat((1.0 - smooth) * 255.0);
-    }
-
     pub fn fillRect(self: *Canvas, x: i32, y: i32, w: i32, h: i32, color: Color) void {
         const x0 = @max(0, x);
         const y0 = @max(0, y);
@@ -72,74 +63,6 @@ pub const Canvas = struct {
         }
     }
 
-    pub fn fillRoundedRect(self: *Canvas, x: i32, y: i32, w: i32, h: i32, radius: i32, color: Color) void {
-        if (radius <= 0) {
-            self.fillRect(x, y, w, h, color);
-            return;
-        }
-        if (color.a == 0) return;
-
-        const x0 = @max(0, x);
-        const y0 = @max(0, y);
-        const x1 = @min(self.width, x + w);
-        const y1 = @min(self.height, y + h);
-        if (x0 >= x1 or y0 >= y1) return;
-
-        const r = @min(radius, @divTrunc(@min(w, h), 2));
-        const r_u: u32 = @intCast(r);
-        const r_sq = r_u * r_u;
-        const band: u32 = @max(2, @divTrunc(r_u + 2, 3));
-
-        var row: i32 = y0;
-        while (row < y1) : (row += 1) {
-            const py = row - y;
-            const in_y_top = py < r;
-            const in_y_bot = py >= h - r;
-
-            var col: i32 = x0;
-            while (col < x1) : (col += 1) {
-                const px = col - x;
-                const in_x_left = px < r;
-                const in_x_right = px >= w - r;
-
-                if ((!in_y_top and !in_y_bot) or (!in_x_left and !in_x_right)) {
-                    const offset = @as(usize, @intCast(row * self.stride + col * 4));
-                    const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
-                    dst.* = blendPixel(dst.*, color);
-                    continue;
-                }
-
-                const cx: i32 = if (in_x_left) r else w - r - 1;
-                const cy: i32 = if (in_y_top) r else h - r - 1;
-                const dx = @as(i32, px) - cx;
-                const dy = @as(i32, py) - cy;
-                const dist_sq: u32 = @intCast(dx * dx + dy * dy);
-
-                if (dist_sq >= r_sq + band * band) continue;
-                if (dist_sq <= r_sq -| band *| band) {
-                    const offset = @as(usize, @intCast(row * self.stride + col * 4));
-                    const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
-                    dst.* = blendPixel(dst.*, color);
-                    continue;
-                }
-
-                const dist = isqrt(dist_sq);
-                const coverage = coverageAA(dist, r_u, band);
-                if (coverage == 0) continue;
-
-                const c = Color{
-                    .r = color.r,
-                    .g = color.g,
-                    .b = color.b,
-                    .a = @intCast(@min(@as(u32, 255), @as(u32, color.a) * coverage / 255)),
-                };
-                const offset = @as(usize, @intCast(row * self.stride + col * 4));
-                const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
-                dst.* = blendPixel(dst.*, c);
-            }
-        }
-    }
-
     pub fn fillCircle(self: *Canvas, cx: i32, cy: i32, radius: i32, color: Color) void {
         if (radius <= 0 or color.a == 0) return;
         const x0 = @max(0, cx - radius - 1);
@@ -147,35 +70,26 @@ pub const Canvas = struct {
         const x1 = @min(self.width, cx + radius + 2);
         const y1 = @min(self.height, cy + radius + 2);
 
-        const r_u: u32 = @intCast(radius);
-        const r_sq = r_u * r_u;
-        const band: u32 = if (r_u < 4) 1 else @max(2, @divTrunc(r_u + 2, 3));
+        const r_f: f32 = @floatFromInt(radius);
+        const cxf: f32 = @as(f32, @floatFromInt(cx)) + 0.5;
+        const cyf: f32 = @as(f32, @floatFromInt(cy)) + 0.5;
 
         var row: i32 = y0;
         while (row < y1) : (row += 1) {
+            const py: f32 = @as(f32, @floatFromInt(row)) + 0.5;
             var col: i32 = x0;
             while (col < x1) : (col += 1) {
-                const dx = @as(i32, col) - cx;
-                const dy = @as(i32, row) - cy;
-                const dist_sq: u32 = @intCast(dx * dx + dy * dy);
-
-                if (dist_sq >= r_sq + band * band) continue;
-                if (dist_sq <= r_sq -| band *| band) {
-                    const offset = @as(usize, @intCast(row * self.stride + col * 4));
-                    const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
-                    dst.* = blendPixel(dst.*, color);
-                    continue;
-                }
-
-                const dist = isqrt(dist_sq);
-                const coverage = coverageAA(dist, r_u, band);
+                const px: f32 = @as(f32, @floatFromInt(col)) + 0.5;
+                const dx = px - cxf;
+                const dy = py - cyf;
+                const dist = @sqrt(dx * dx + dy * dy) - r_f;
+                const coverage = sdfCoverage(dist);
                 if (coverage == 0) continue;
-
-                const c = Color{
+                const c = if (coverage == 255) color else Color{
                     .r = color.r,
                     .g = color.g,
                     .b = color.b,
-                    .a = @intCast(@min(@as(u32, 255), @as(u32, color.a) * coverage / 255)),
+                    .a = @intCast(@min(@as(u32, 255), @as(u32, color.a) * @as(u32, @intCast(coverage)) / 255)),
                 };
                 const offset = @as(usize, @intCast(row * self.stride + col * 4));
                 const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
@@ -191,36 +105,31 @@ pub const Canvas = struct {
         const x1 = @min(self.width, cx + outer_r + 2);
         const y1 = @min(self.height, cy + outer_r + 2);
 
-        const outer_u: u32 = @intCast(outer_r);
-        const inner_u: u32 = @intCast(inner_r);
-        const outer_sq = outer_u * outer_u;
-        const inner_sq = inner_u * inner_u;
-        const band: u32 = if (outer_u < 4) 1 else @max(2, @divTrunc(outer_u + 2, 3));
+        const outer_f: f32 = @floatFromInt(outer_r);
+        const inner_f: f32 = @floatFromInt(inner_r);
+        const cxf: f32 = @as(f32, @floatFromInt(cx)) + 0.5;
+        const cyf: f32 = @as(f32, @floatFromInt(cy)) + 0.5;
 
         var row: i32 = y0;
         while (row < y1) : (row += 1) {
+            const py: f32 = @as(f32, @floatFromInt(row)) + 0.5;
             var col: i32 = x0;
             while (col < x1) : (col += 1) {
-                const dx = @as(i32, col) - cx;
-                const dy = @as(i32, row) - cy;
-                const dist_sq: u32 = @intCast(dx * dx + dy * dy);
+                const px: f32 = @as(f32, @floatFromInt(col)) + 0.5;
+                const dx = px - cxf;
+                const dy = py - cyf;
+                const dist = @sqrt(dx * dx + dy * dy);
 
-                if (dist_sq >= outer_sq + band * band) continue;
-                if (dist_sq <= inner_sq -| band *| band) continue;
+                const cov_outer = sdfCoverage(dist - outer_f);
+                if (cov_outer == 0) continue;
+                const cov_inner: u8 = if (inner_r > 0) sdfCoverage(inner_f - dist) else 0;
+                const coverage: u32 = if (inner_r > 0)
+                    @as(u32, @intCast(cov_outer)) * @as(u32, @intCast(cov_inner)) / 255
+                else
+                    @as(u32, @intCast(cov_outer));
 
-                const dist = isqrt(dist_sq);
-                var cov_outer: u32 = 255;
-                if (dist >= outer_u -| band) {
-                    cov_outer = coverageAA(dist, outer_u, band);
-                }
-                var cov_inner: u32 = 0;
-                if (dist >= inner_u -| band and inner_r > 0) {
-                    cov_inner = coverageAA(dist, inner_u, band);
-                }
-                const coverage = cov_outer -| cov_inner;
                 if (coverage == 0) continue;
-
-                const c = Color{
+                const c = if (coverage == 255) color else Color{
                     .r = color.r,
                     .g = color.g,
                     .b = color.b,
@@ -280,29 +189,35 @@ pub const Canvas = struct {
         self.fillRect(0, 0, self.width, self.height, color);
     }
 
-    fn isqrt(n: u32) u32 {
-        if (n == 0) return 0;
-        var x = n;
-        var y = (x + 1) / 2;
-        while (y < x) {
-            x = y;
-            y = (x + n / x) / 2;
-        }
-        return x;
-    }
-
     fn sdfRoundedRect(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: f32) f32 {
         const cx = x + w * 0.5;
         const cy = y + h * 0.5;
         const qx = @abs(px - cx);
         const qy = @abs(py - cy);
-        const hw = w * 0.5 - r;
-        const hh = h * 0.5 - r;
-        const dx = qx - hw;
-        const dy = qy - hh;
-        const ex = if (dx > 0) dx else 0.0;
-        const ey = if (dy > 0) dy else 0.0;
-        return @sqrt(ex * ex + ey * ey) - r;
+        const hw = w * 0.5;
+        const hh = h * 0.5;
+        const dx = qx - hw + r;
+        const dy = qy - hh + r;
+        return @min(@max(dx, dy), 0.0) + @sqrt(@max(dx, 0.0) * @max(dx, 0.0) + @max(dy, 0.0) * @max(dy, 0.0)) - r;
+    }
+
+    fn sdfRoundedRectCorners(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r_tl: f32, r_tr: f32, r_bl: f32, r_br: f32) f32 {
+        const cx = x + w * 0.5;
+        const cy = y + h * 0.5;
+        const qx = @abs(px - cx);
+        const qy = @abs(py - cy);
+        const hw = w * 0.5;
+        const hh = h * 0.5;
+
+        // Select corner radius based on quadrant
+        const r: f32 = if (px >= cx)
+            if (py >= cy) r_br else r_tr
+        else
+            if (py >= cy) r_bl else r_tl;
+
+        const dx = qx - hw + r;
+        const dy = qy - hh + r;
+        return @min(@max(dx, dy), 0.0) + @sqrt(@max(dx, 0.0) * @max(dx, 0.0) + @max(dy, 0.0) * @max(dy, 0.0)) - r;
     }
 
     fn sdfCoverage(dist: f32) u8 {
@@ -335,10 +250,10 @@ pub const Canvas = struct {
 
         var row: i32 = y0;
         while (row < y1) : (row += 1) {
-            const py: f32 = @floatFromInt(row);
+            const py: f32 = @as(f32, @floatFromInt(row)) + 0.5;
             var col: i32 = x0;
             while (col < x1) : (col += 1) {
-                const px: f32 = @floatFromInt(col);
+                const px: f32 = @as(f32, @floatFromInt(col)) + 0.5;
                 const dist = sdfRoundedRect(px, py, xf, yf, wf, hf, rf);
                 const coverage = sdfCoverage(dist);
                 if (coverage == 0) continue;
@@ -355,49 +270,101 @@ pub const Canvas = struct {
         }
     }
 
-    pub fn drawGlow(self: *Canvas, x: i32, y: i32, w: i32, h: i32, radius: i32, color: Color, spread: f32) void {
-        if (color.a == 0 or spread <= 0) return;
-        const si: i32 = @intFromFloat(spread);
-        const x0 = @max(0, x - si);
-        const y0 = @max(0, y - si);
-        const x1 = @min(self.width, x + w + si);
-        const y1 = @min(self.height, y + h + si);
+    pub fn fillRoundedRectCorners(self: *Canvas, x: i32, y: i32, w: i32, h: i32, r_tl: i32, r_tr: i32, r_bl: i32, r_br: i32, color: Color) void {
+        if (color.a == 0) return;
+        if (r_tl <= 0 and r_tr <= 0 and r_bl <= 0 and r_br <= 0) {
+            self.fillRect(x, y, w, h, color);
+            return;
+        }
+
+        const x0 = @max(0, x - 1);
+        const y0 = @max(0, y - 1);
+        const x1 = @min(self.width, x + w + 1);
+        const y1 = @min(self.height, y + h + 1);
         if (x0 >= x1 or y0 >= y1) return;
 
         const xf: f32 = @floatFromInt(x);
         const yf: f32 = @floatFromInt(y);
         const wf: f32 = @floatFromInt(w);
         const hf: f32 = @floatFromInt(h);
-        const rf: f32 = @floatFromInt(radius);
-        const spread_inv: f32 = 1.0 / spread;
+        const r_tl_f: f32 = @floatFromInt(@min(r_tl, @divTrunc(@min(w, h), 2)));
+        const r_tr_f: f32 = @floatFromInt(@min(r_tr, @divTrunc(@min(w, h), 2)));
+        const r_bl_f: f32 = @floatFromInt(@min(r_bl, @divTrunc(@min(w, h), 2)));
+        const r_br_f: f32 = @floatFromInt(@min(r_br, @divTrunc(@min(w, h), 2)));
 
         var row: i32 = y0;
         while (row < y1) : (row += 1) {
-            const py: f32 = @floatFromInt(row);
+            const py: f32 = @as(f32, @floatFromInt(row)) + 0.5;
             var col: i32 = x0;
             while (col < x1) : (col += 1) {
-                const px: f32 = @floatFromInt(col);
-                const dist = sdfRoundedRect(px, py, xf, yf, wf, hf, rf);
-                if (dist >= 0) {
-                    const t = dist * spread_inv;
-                    const glow = @exp(-t * t * 4.0);
-                    if (glow < 1.0 / 256.0) continue;
-                    const alpha_f = @as(f32, @floatFromInt(color.a)) * glow;
-                    const alpha: u8 = @intFromFloat(if (alpha_f >= 255.0) 255.0 else alpha_f);
-                    if (alpha == 0) continue;
-                    const c = Color{
-                        .r = color.r,
-                        .g = color.g,
-                        .b = color.b,
-                        .a = alpha,
-                    };
-                    const offset = @as(usize, @intCast(row * self.stride + col * 4));
-                    const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
-                    dst.* = blendPixel(dst.*, c);
-                }
+                const px: f32 = @as(f32, @floatFromInt(col)) + 0.5;
+                const dist = sdfRoundedRectCorners(px, py, xf, yf, wf, hf, r_tl_f, r_tr_f, r_bl_f, r_br_f);
+                const coverage = sdfCoverage(dist);
+                if (coverage == 0) continue;
+                const c = if (coverage == 255) color else Color{
+                    .r = color.r,
+                    .g = color.g,
+                    .b = color.b,
+                    .a = @intCast(@min(@as(u32, 255), @as(u32, color.a) * @as(u32, @intCast(coverage)) / 255)),
+                };
+                const offset = @as(usize, @intCast(row * self.stride + col * 4));
+                const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
+                dst.* = blendPixel(dst.*, c);
             }
         }
     }
+
+    pub fn fillArc(self: *Canvas, cx: i32, cy: i32, inner_r: i32, outer_r: i32, start_angle: f32, sweep_angle: f32, color: Color) void {
+        if (outer_r <= inner_r or color.a == 0) return;
+        const x0 = @max(0, cx - outer_r - 1);
+        const y0 = @max(0, cy - outer_r - 1);
+        const x1 = @min(self.width, cx + outer_r + 2);
+        const y1 = @min(self.height, cy + outer_r + 2);
+
+        const outer_f: f32 = @floatFromInt(outer_r);
+        const inner_f: f32 = @floatFromInt(inner_r);
+        const cxf: f32 = @as(f32, @floatFromInt(cx)) + 0.5;
+        const cyf: f32 = @as(f32, @floatFromInt(cy)) + 0.5;
+
+        var row: i32 = y0;
+        while (row < y1) : (row += 1) {
+            const py: f32 = @as(f32, @floatFromInt(row)) + 0.5;
+            var col: i32 = x0;
+            while (col < x1) : (col += 1) {
+                const px: f32 = @as(f32, @floatFromInt(col)) + 0.5;
+                const dx = px - cxf;
+                const dy = py - cyf;
+                const dist = @sqrt(dx * dx + dy * dy);
+
+                const cov_outer = sdfCoverage(dist - outer_f);
+                if (cov_outer == 0) continue;
+                const cov_inner: u8 = if (inner_r > 0) sdfCoverage(inner_f - dist) else 0;
+                var coverage: u32 = if (inner_r > 0)
+                    @as(u32, @intCast(cov_outer)) * @as(u32, @intCast(cov_inner)) / 255
+                else
+                    @as(u32, @intCast(cov_outer));
+
+                if (coverage > 0) {
+                    const angle = std.math.atan2(-dy, dx);
+                    var a = angle - start_angle;
+                    if (a < 0) a += std.math.tau;
+                    if (a > sweep_angle) coverage = 0;
+                }
+
+                if (coverage == 0) continue;
+                const c = if (coverage == 255) color else Color{
+                    .r = color.r,
+                    .g = color.g,
+                    .b = color.b,
+                    .a = @intCast(@min(@as(u32, 255), @as(u32, color.a) * coverage / 255)),
+                };
+                const offset = @as(usize, @intCast(row * self.stride + col * 4));
+                const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
+                dst.* = blendPixel(dst.*, c);
+            }
+        }
+    }
+
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -490,7 +457,9 @@ pub const Font = struct {
         const rows = bitmap.rows;
         const buf_len: usize = @intCast(@abs(pitch) * rows);
         const buf = try f.allocator.alloc(u8, buf_len);
-        @memcpy(buf, bitmap.buffer[0..buf_len]);
+        if (buf_len > 0 and bitmap.buffer != null) {
+            @memcpy(buf, bitmap.buffer[0..buf_len]);
+        }
 
         gop.value_ptr.* = Glyph{
             .width = @intCast(bitmap.width),
@@ -557,8 +526,8 @@ pub fn renderText(canvas: *Canvas, font: *Font, text: []const u8, x: i32, y: i32
             continue;
         };
 
-        const dst_x = (pen_x_26_6 + x_offset + (glyph.left << 6)) >> 6;
-        const dst_y = baseline_y + (y_offset >> 6) - glyph.top;
+        const dst_x = (pen_x_26_6 + x_offset + (glyph.left << 6) + 32) >> 6;
+        const dst_y = baseline_y + ((y_offset + 32) >> 6) - glyph.top;
 
         canvas.blitGray(dst_x, dst_y, @intCast(glyph.width), @intCast(glyph.height), glyph.pitch, glyph.buf, color);
 

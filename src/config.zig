@@ -115,7 +115,7 @@ pub const Appearance = struct {
     pub const m3on_secondary_container = Color.rgba(0xec, 0xe6, 0xe9, 0xFF);
 
     // Semantic layer colors
-    pub const col_layer1 = Color.rgba(0x1c, 0x1b, 0x1c, 0xE0);
+    pub const col_layer1 = Color.rgba(0x1c, 0x1b, 0x1c, 0xFF);
     pub const col_on_layer0 = m3on_background;
     pub const col_on_layer1 = m3on_surface_variant;
     pub const col_on_layer1_inactive = Color.rgba(0x7d, 0x78, 0x7c, 0xFF);
@@ -171,6 +171,7 @@ pub const Config = struct {
     font_material: []const u8 = "MaterialSymbolsRounded.ttf",
     font_size: u32 = 15,
     font_size_large: u32 = 17,
+    font_size_material: u32 = 18,
 };
 
 var global_config: Config = .{};
