@@ -75,7 +75,7 @@ pub const Appearance = struct {
     pub const center_spacing: i32 = 4;
 
     pub const ws_btn_size: i32 = 26;
-    pub const ws_count: i32 = 5;
+    pub const ws_count: i32 = 9;
     pub const ws_active_margin: i32 = 2;
     pub const ws_bargroup_padding: i32 = 4;
 
@@ -172,7 +172,7 @@ pub const Config = struct {
     font_size_small: u32 = 12,
     font_size: u32 = 15,
     font_size_large: u32 = 17,
-    font_size_material: u32 = 18,
+    font_size_material: u32 = 19,
     font_size_sidebar: u32 = 22,
 };
 
@@ -255,4 +255,155 @@ pub fn detectDistroIcon() u21 {
     }
 
     return 0xF313; // nixos fallback
+}
+
+// ═══════════════════════════════════════════════════════════
+// System resource reading (RAM, CPU, temp from /proc)
+// ═══════════════════════════════════════════════════════════
+
+pub const ResourceState = struct {
+    memory_used_pct: f32 = 0,
+    memory_used_kb: u64 = 0,
+    memory_total_kb: u64 = 0,
+    memory_avail_kb: u64 = 0,
+    swap_used_pct: f32 = 0,
+    swap_total_kb: u64 = 0,
+    swap_used_kb: u64 = 0,
+    cpu_usage: f32 = 0.01,
+    cpu_temp: f32 = 0,
+    cpu_prev: [10]u64 = .{0} ** 10,
+    cpu_initialized: bool = false,
+};
+
+pub fn updateResources(state: *ResourceState) void {
+    readMemInfo(state);
+    readCpuStat(state);
+    readTemp(state);
+}
+
+fn readMemInfo(state: *ResourceState) void {
+    const fd = std.c.open("/proc/meminfo", .{}, @as(c_uint, 0));
+    if (fd == -1) return;
+    defer _ = std.c.close(fd);
+
+    var buf: [4096]u8 = undefined;
+    const nread = std.c.read(fd, &buf, buf.len);
+    if (nread <= 0) return;
+    const content = buf[0..@as(usize, @intCast(nread))];
+
+    var mem_total: u64 = 0;
+    var mem_avail: u64 = 0;
+    var swap_total: u64 = 0;
+    var swap_free: u64 = 0;
+
+    var line_iter = std.mem.splitScalar(u8, content, '\n');
+    while (line_iter.next()) |raw| {
+        const line = std.mem.trim(u8, raw, &[_]u8{ ' ', '\r' });
+        if (std.mem.startsWith(u8, line, "MemTotal:")) {
+            mem_total = parseKbValue(line["MemTotal:".len..]);
+        } else if (std.mem.startsWith(u8, line, "MemAvailable:")) {
+            mem_avail = parseKbValue(line["MemAvailable:".len..]);
+        } else if (std.mem.startsWith(u8, line, "SwapTotal:")) {
+            swap_total = parseKbValue(line["SwapTotal:".len..]);
+        } else if (std.mem.startsWith(u8, line, "SwapFree:")) {
+            swap_free = parseKbValue(line["SwapFree:".len..]);
+        }
+    }
+
+    state.memory_total_kb = mem_total;
+    state.memory_avail_kb = mem_avail;
+    state.swap_total_kb = swap_total;
+    state.swap_used_kb = swap_total -| swap_free;
+    if (mem_total > 0) {
+        state.memory_used_kb = mem_total -| mem_avail;
+        state.memory_used_pct = @as(f32, @floatFromInt(state.memory_used_kb)) / @as(f32, @floatFromInt(mem_total));
+    }
+    if (swap_total > 0) {
+        state.swap_used_pct = @as(f32, @floatFromInt(state.swap_used_kb)) / @as(f32, @floatFromInt(swap_total));
+    }
+}
+
+fn parseKbValue(s: []const u8) u64 {
+    const trimmed = std.mem.trim(u8, s, " \t");
+    var i: usize = 0;
+    while (i < trimmed.len and (trimmed[i] == ' ' or trimmed[i] == '\t')) : (i += 1) {}
+    var num: u64 = 0;
+    while (i < trimmed.len and trimmed[i] >= '0' and trimmed[i] <= '9') : (i += 1) {
+        num = num * 10 + (trimmed[i] - '0');
+    }
+    return num;
+}
+
+fn readCpuStat(state: *ResourceState) void {
+    const fd = std.c.open("/proc/stat", .{}, @as(c_uint, 0));
+    if (fd == -1) return;
+    defer _ = std.c.close(fd);
+
+    var buf: [4096]u8 = undefined;
+    const nread = std.c.read(fd, &buf, buf.len);
+    if (nread <= 0) return;
+    const content = buf[0..@as(usize, @intCast(nread))];
+
+    var line_iter = std.mem.splitScalar(u8, content, '\n');
+    const first = line_iter.next() orelse return;
+    if (!std.mem.startsWith(u8, first, "cpu ")) return;
+
+    var current: [10]u64 = .{0} ** 10;
+    const rest = first["cpu ".len..];
+    var field_idx: usize = 0;
+    var idx: usize = 0;
+    while (field_idx < 10 and idx < rest.len) {
+        while (idx < rest.len and (rest[idx] == ' ' or rest[idx] == '\t')) : (idx += 1) {}
+        if (idx >= rest.len) break;
+        var num: u64 = 0;
+        while (idx < rest.len and rest[idx] >= '0' and rest[idx] <= '9') : (idx += 1) {
+            num = num * 10 + (rest[idx] - '0');
+        }
+        current[field_idx] = num;
+        field_idx += 1;
+    }
+
+    if (!state.cpu_initialized) {
+        state.cpu_prev = current;
+        state.cpu_initialized = true;
+        state.cpu_usage = 0;
+        return;
+    }
+
+    var prev_total: u64 = 0;
+    var curr_total: u64 = 0;
+    for (0..10) |j| {
+        curr_total +|= current[j];
+        prev_total +|= state.cpu_prev[j];
+    }
+    const prev_idle = state.cpu_prev[3] + state.cpu_prev[4];
+    const curr_idle = current[3] + current[4];
+    const total_delta = curr_total -| prev_total;
+    const idle_delta = curr_idle -| prev_idle;
+
+    if (total_delta > 0) {
+        state.cpu_usage = @as(f32, @floatFromInt(total_delta - idle_delta)) / @as(f32, @floatFromInt(total_delta));
+    }
+    state.cpu_prev = current;
+}
+
+fn readTemp(state: *ResourceState) void {
+    const fd = std.c.open("/sys/class/thermal/thermal_zone0/temp", .{}, @as(c_uint, 0));
+    if (fd == -1) return;
+    defer _ = std.c.close(fd);
+
+    var buf: [32]u8 = undefined;
+    const nread = std.c.read(fd, &buf, buf.len);
+    if (nread <= 0) return;
+
+    const content = std.mem.trim(u8, buf[0..@as(usize, @intCast(nread))], " \n\r\t");
+    if (content.len == 0) return;
+
+    var num: u64 = 0;
+    for (content) |c| {
+        if (c >= '0' and c <= '9') {
+            num = num * 10 + (c - '0');
+        } else break;
+    }
+    state.cpu_temp = @as(f32, @floatFromInt(num)) / 1000.0;
 }

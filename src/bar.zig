@@ -217,7 +217,7 @@ pub const Bar = struct {
 
         const wsBtnWidth: i32 = 26;
         const wsActiveMargin: i32 = 2;
-        const wsCount: usize = 5;
+        const wsCount: usize = @as(usize, @intCast(Appearance.ws_count));
         const wsTotalWidth: i32 = wsBtnWidth * @as(i32, @intCast(wsCount));
         const wsBarGroupPadding: i32 = 4;
         const wsBarGroupW: i32 = wsTotalWidth + wsBarGroupPadding * 2;
@@ -299,38 +299,45 @@ pub const Bar = struct {
         // ─── 3a. Left center: Resources + Media ───
         canvas.fillRoundedRectAA(lcX, groupBgY, centerSideModuleWidth, groupBgH, smallRounding, colLayer1);
 
-        var resX: i32 = lcX + groupPadding + 4; // 4px left margin (end-4 Resources RowLayout)
-        const resIcons = [_][]const u8{ "memory", "swap_horiz", "planner_review" };
+        var resX: i32 = lcX + groupPadding + 4;
+        const res = &ctx.resources;
+        const resData = [_]struct { icon: []const u8, pct: f32, skip: bool }{
+            .{ .icon = "memory", .pct = res.memory_used_pct, .skip = false },
+            .{ .icon = "swap_horiz", .pct = res.swap_used_pct, .skip = res.swap_total_kb == 0 },
+            .{ .icon = "planner_review", .pct = res.cpu_usage, .skip = false },
+        };
         const half_pi: f32 = @as(f32, std.math.pi) / 2.0;
         const two_pi: f32 = 2.0 * @as(f32, std.math.pi);
-        for (resIcons, 0..) |icon, ri| {
+        var first = true;
+        for (resData) |rd| {
+            if (rd.skip) continue;
+            if (!first) resX += 6;
+            first = false;
             const ringR: i32 = 10;
             const ringCX: i32 = resX + ringR;
-            // Track: filled circle at 50% alpha (end-4 transparentize colPrimary, 0.5)
             canvas.fillCircle(ringCX, centerY, @as(f32, @floatFromInt(ringR)), Color.rgba(0xec, 0xe6, 0xe9, 0x80));
-            // Progress: filled sector from center, clockwise from top (end-4 ClippedFilledCircularProgress)
-            canvas.fillArc(ringCX, centerY, 0, ringR, half_pi, -two_pi * 0.52, colOnSecondaryContainer);
+            if (rd.pct > 0) {
+                canvas.fillArc(ringCX, centerY, 0, ringR, half_pi, -two_pi * rd.pct, colOnSecondaryContainer);
+            }
 
-            // Icon: hole cutout in circle → use bg color (colLayer1) to simulate mask (end-4 OpacityMask invert)
             if (self.font_material) |*fMat| {
                 const tbl = @divTrunc(bar_h - fMat.lineHeight(), 2) + fMat.baselineOffset();
-                render_mod.renderText(&canvas, fMat, icon, ringCX - 8, tbl, colLayer1);
+                render_mod.renderText(&canvas, fMat, rd.icon, ringCX - 8, tbl, colLayer1);
             }
 
-            // Percentage text at 15px, outside circle (end-4 StyledText small in RowLayout)
             if (self.font) |*f| {
                 const tbl2 = @divTrunc(bar_h - f.lineHeight(), 2) + f.baselineOffset();
-                const pctStr = "52";
+                const pctInt: i32 = @intFromFloat(rd.pct * 100.0);
+                var pctBuf: [8]u8 = undefined;
+                const pctStr = std.fmt.bufPrint(&pctBuf, "{d}", .{pctInt}) catch "0";
                 render_mod.renderText(&canvas, f, pctStr, ringCX + ringR + 2, tbl2, colOnLayer1);
             }
-            // Gap between resources: 6px spacing + ring(20) + icon(16) + text(approx 16)
-            resX += 44;
-            _ = ri;
+            resX += 46;
         }
 
         // Optional media widget when module is wide enough (end-4 Media.qml)
         if (centerSideModuleWidth > 200) {
-            resX += 6;
+            resX += 8;
             const mediaRingCX: i32 = resX + 10;
             const mediaProgress: f32 = 0.42; // placeholder: 42% progress
             canvas.fillCircle(mediaRingCX, centerY, 10.0, Color.rgba(0xec, 0xe6, 0xe9, 0x80));
@@ -345,7 +352,7 @@ pub const Bar = struct {
             const mediaTextW: i32 = lcX + centerSideModuleWidth - resX - groupPadding;
             if (mediaTextW > 10 and self.font != null) {
                 const tbl = @divTrunc(bar_h - self.font.?.lineHeight(), 2) + self.font.?.baselineOffset();
-                render_mod.renderText(&canvas, &self.font.?, "Song Title", resX, tbl, colOnLayer1);
+                render_mod.renderText(&canvas, &self.font.?, "No media", resX, tbl, colOnLayer1);
             }
         }
 
@@ -405,9 +412,97 @@ pub const Bar = struct {
             canvas.fillCircle(dotCX, centerY, dotR, textColor);
         }
 
-        // ─── 3c. Right center: Clock + Battery ───
+        // ─── 3c. Right center: Background (content drawn after indicators) ───
         canvas.fillRoundedRectAA(rcX, groupBgY, centerSideModuleWidth, groupBgH, smallRounding, colLayer1);
 
+        // ═══ 4. RIGHT SECTION: Indicators (RTL, end-4 BarContent) ═══
+        // end-4 order (right-to-left inside RippleButton, visible in RTL):
+        //   bt → wifi → notif → xkb → mic_off → volume_off
+        //   (rightmost to leftmost)
+        // Plus: SysTray (left of indicators), Weather (left of systray)
+        // Transparent by default, shows colLayer1Hover on hover (not implemented)
+        var indicatorSpacing: i32 = 15;
+
+        // end-4: RippleButton has 10px horizontal padding around indicators
+        // bt right edge = content right edge (no margin to button padding)
+        var rx: i32 = bar_w - screenRounding - 10;
+        if (self.font_material) |*fMat| {
+            // Pre-compute widths to check overlap with right center module
+            const btW = render_mod.textWidth(fMat, "bluetooth_connected");
+            const wifiW = render_mod.textWidth(fMat, "network_wifi");
+            const notifW = render_mod.textWidth(fMat, "notifications");
+            const micW = render_mod.textWidth(fMat, "mic_off");
+            const volW = render_mod.textWidth(fMat, "volume_off");
+            const xkbW = if (self.font) |*f| render_mod.textWidth(f, "EN") else 0;
+            const totalW = btW + wifiW + notifW + micW + volW + xkbW;
+            const rightEdge = rcX + centerSideModuleWidth;
+            const needed = rightEdge + 10 + totalW + indicatorSpacing * 5;
+            if (needed > rx) {
+                const available = rx - rightEdge - 10 - totalW;
+                if (available > 0) {
+                    indicatorSpacing = @max(@divTrunc(available, 5), 5);
+                } else {
+                    indicatorSpacing = 5;
+                }
+            }
+
+            const tbl = @divTrunc(bar_h - fMat.lineHeight(), 2) + fMat.baselineOffset();
+
+            // RTL draw order: rightmost → leftmost
+
+            // 1. bluetooth (end-4: rightmost, Layout.leftMargin:15 → spacing before bt)
+            {
+                const iw = btW;
+                rx -= iw;
+                render_mod.renderText(&canvas, fMat, "bluetooth_connected", rx, tbl, colOnLayer0);
+            }
+            rx -= indicatorSpacing;
+
+            // 2. network_wifi (end-4: always shown)
+            {
+                const iw = wifiW;
+                rx -= iw;
+                render_mod.renderText(&canvas, fMat, "network_wifi", rx, tbl, colOnLayer0);
+            }
+            rx -= indicatorSpacing;
+
+            // 3. notifications (end-4: Revealer, badge dot when unread)
+            {
+                const iw = notifW;
+                rx -= iw;
+                render_mod.renderText(&canvas, fMat, "notifications", rx, tbl, colOnLayer0);
+                const icon_top = tbl - fMat.baselineOffset();
+                canvas.fillCircle(rx + iw - 5, icon_top + 7, 4.0, colOnLayer0);
+            }
+            rx -= indicatorSpacing;
+
+            // 4. xkb layout abbreviation (end-4: regular StyledText, not MaterialSymbol)
+            if (self.font) |*f| {
+                const fTbl = @divTrunc(bar_h - f.lineHeight(), 2) + f.baselineOffset();
+                const iw = xkbW;
+                rx -= iw;
+                render_mod.renderText(&canvas, f, "EN", rx, fTbl, colOnLayer0);
+            }
+            rx -= indicatorSpacing;
+
+            // 5. mic_off (end-4: Revealer)
+            {
+                const iw = micW;
+                rx -= iw;
+                render_mod.renderText(&canvas, fMat, "mic_off", rx, tbl, colOnLayer0);
+            }
+            rx -= indicatorSpacing;
+
+            // 6. volume_off (end-4: leftmost, no margin after — button padding handles it)
+            {
+                const iw = volW;
+                rx -= iw;
+                render_mod.renderText(&canvas, fMat, "volume_off", rx, tbl, colOnLayer0);
+            }
+            // NO spacing after last item
+        }
+
+        // ═══ 5. RIGHT CENTER CONTENT: Clock + Battery (drawn above indicators) ═══
         if (self.font) |*f| {
             const tbl = @divTrunc(bar_h - f.lineHeight(), 2) + f.baselineOffset();
             const clockStr = "12:34";
@@ -425,22 +520,18 @@ pub const Bar = struct {
             render_mod.renderText(&canvas, f, dateStr, cx, tbl, colOnLayer1);
         }
 
-        // Battery indicator (end-4 ClippedProgressBar)
+        // Battery indicator (end-4 ClippedProgressBar, respects BarGroup padding=5)
         const batW: i32 = 30;
         const batH: i32 = 18;
-        const batX: i32 = rcX + centerSideModuleWidth - batW - 8;
+        const batX: i32 = rcX + centerSideModuleWidth - batW - groupPadding;
         const batY: i32 = centerY - @divTrunc(batH, 2);
-        // Track: colOnSecondaryContainer at 50% alpha (end-4 transparentize(0.5))
         const batTrack = Color.rgba(0xec, 0xe6, 0xe9, 0x80);
         canvas.fillRoundedRectAA(batX, batY, batW, batH, fullRounding, batTrack);
-        // Fill: colOnSecondaryContainer
         const batFillW: i32 = @divTrunc((batW - 4) * 80, 100);
         if (batFillW > 0) {
             canvas.fillRoundedRectAA(batX + 2, batY + 2, batFillW, batH - 4, fullRounding, colOnSecondaryContainer);
         }
-        // Text centered: numeric only, no "%" (end-4 ClippedProgressBar text)
-        // When charging: show bolt icon from material font instead (end-4 BatteryIndicator)
-        const charging = false; // TODO: read from UPower D-Bus service
+        const charging = false;
         if (charging) {
             if (self.font_material) |*fMat| {
                 const tbl = batY + @divTrunc(batH - fMat.lineHeight(), 2) + fMat.baselineOffset();
@@ -457,82 +548,7 @@ pub const Bar = struct {
             }
         }
 
-        // ═══ 4. RIGHT SECTION: Indicators (RTL, end-4 BarContent) ═══
-        // end-4 order (right-to-left inside RippleButton, visible in RTL):
-        //   bt → wifi → notif → xkb → mic_off → volume_off
-        //   (rightmost to leftmost)
-        // Plus: SysTray (left of indicators), Weather (left of systray)
-        // Transparent by default, shows colLayer1Hover on hover (not implemented)
-        const indicatorSpacing: i32 = 15;
-
-        // end-4: RippleButton has 10px horizontal padding around indicators
-        // bt right edge = content right edge (no margin to button padding)
-        var rx: i32 = bar_w - screenRounding - 10;
-        if (self.font_material) |*fMat| {
-            const tbl = @divTrunc(bar_h - fMat.lineHeight(), 2) + fMat.baselineOffset();
-
-            // RTL draw order: rightmost → leftmost
-
-            // 1. bluetooth (end-4: rightmost, Layout.leftMargin:15 → spacing before bt)
-            {
-                const item = "bluetooth_connected";
-                const iw = render_mod.textWidth(fMat, item);
-                rx -= iw;
-                render_mod.renderText(&canvas, fMat, item, rx, tbl, colOnLayer0);
-            }
-            rx -= indicatorSpacing;
-
-            // 2. network_wifi (end-4: always shown)
-            {
-                const item = "network_wifi";
-                const iw = render_mod.textWidth(fMat, item);
-                rx -= iw;
-                render_mod.renderText(&canvas, fMat, item, rx, tbl, colOnLayer0);
-            }
-            rx -= indicatorSpacing;
-
-            // 3. notifications (end-4: Revealer, badge dot when unread)
-            {
-                const item = "notifications";
-                const iw = render_mod.textWidth(fMat, item);
-                rx -= iw;
-                render_mod.renderText(&canvas, fMat, item, rx, tbl, colOnLayer0);
-                // badge dot: 8px circle, anchored top-right with (1,3) margins
-                const icon_top = tbl - fMat.baselineOffset();
-                canvas.fillCircle(rx + iw - 5, icon_top + 7, 4.0, colOnLayer0);
-            }
-            rx -= indicatorSpacing;
-
-            // 4. xkb layout abbreviation (end-4: regular StyledText, not MaterialSymbol)
-            if (self.font) |*f| {
-                const fTbl = @divTrunc(bar_h - f.lineHeight(), 2) + f.baselineOffset();
-                const item = "EN";
-                const iw = render_mod.textWidth(f, item);
-                rx -= iw;
-                render_mod.renderText(&canvas, f, item, rx, fTbl, colOnLayer0);
-            }
-            rx -= indicatorSpacing;
-
-            // 5. mic_off (end-4: Revealer)
-            {
-                const item = "mic_off";
-                const iw = render_mod.textWidth(fMat, item);
-                rx -= iw;
-                render_mod.renderText(&canvas, fMat, item, rx, tbl, colOnLayer0);
-            }
-            rx -= indicatorSpacing;
-
-            // 6. volume_off (end-4: leftmost, no margin after — button padding handles it)
-            {
-                const item = "volume_off";
-                const iw = render_mod.textWidth(fMat, item);
-                rx -= iw;
-                render_mod.renderText(&canvas, fMat, item, rx, tbl, colOnLayer0);
-            }
-            // NO spacing after last item
-        }
-
-        // ═══ 5. COMMIT ═══
+        // ═══ 6. COMMIT ═══
         self.layer.surface.attach(buf.buffer, 0, 0);
         self.layer.surface.damageBuffer(0, 0, @intCast(buf.width), @intCast(buf.height));
         self.layer.surface.commit();
@@ -618,7 +634,7 @@ fn handleClick(ctx: *Context, x: i32, y: i32) void {
     const centerModW: i32 = if (bar_w > 1200) 360 else if (bar_w > 1000) 280 else 190;
     const wsBtnWidth: i32 = 26;
     const wsBarGroupPadding: i32 = 4;
-    const wsCount: i32 = 5;
+    const wsCount: i32 = Appearance.ws_count;
     const wsTotalWidth: i32 = wsBtnWidth * wsCount;
     const wsBarGroupW: i32 = wsTotalWidth + wsBarGroupPadding * 2;
 

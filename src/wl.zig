@@ -7,6 +7,7 @@ const ext = wayland.client.ext;
 
 const Rect = @import("config.zig").Rect;
 const Color = @import("config.zig").Color;
+const ResourceState = @import("config.zig").ResourceState;
 
 pub const CursorShape = wp.CursorShapeDeviceV1.Shape;
 
@@ -102,6 +103,8 @@ pub const Context = struct {
 
     /// Set to true when workspace/toplevel state changes — triggers bar redraw
     bar_dirty: bool = false,
+    resources: ResourceState = .{},
+    resource_counter: u32 = 0,
 
     allocator: std.mem.Allocator,
 

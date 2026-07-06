@@ -53,6 +53,14 @@ pub fn main() !void {
             break;
         }
 
+        // Periodic resource update (~3s at 100ms poll intervals)
+        ctx.resource_counter += 1;
+        if (ctx.resource_counter >= 30) {
+            ctx.resource_counter = 0;
+            config_mod.updateResources(&ctx.resources);
+            ctx.bar_dirty = true;
+        }
+
         // Redraw when workspace/toplevel state changed
         if (ctx.bar_dirty) {
             bar_mod.markAllDirty(&ctx);
