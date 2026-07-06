@@ -187,7 +187,7 @@ pub const MprisPlayer = struct {
                 break;
             }
 
-            if (std.mem.eql(u8, ks, "xesam:title") and vt == 's') {
+            const handled = if (std.mem.eql(u8, ks, "xesam:title") and vt == 's') blk: {
                 var val: [*:0]const u8 = undefined;
                 if (bc.sd_bus_message_read(m, "s", &val) > 0) {
                     const vs = std.mem.span(val);
@@ -196,8 +196,10 @@ pub const MprisPlayer = struct {
                     self.title_buf[len] = 0;
                     self.title = self.title_buf[0..len :0];
                     has_title = true;
+                    break :blk true;
                 }
-            } else if (std.mem.eql(u8, ks, "xesam:artist") and vt == 'a') {
+                break :blk false;
+            } else if (std.mem.eql(u8, ks, "xesam:artist") and vt == 'a') blk: {
                 rrc = bc.sd_bus_message_enter_container(m, 'a', "s");
                 if (rrc > 0) {
                     var first = true;
@@ -220,16 +222,21 @@ pub const MprisPlayer = struct {
                     self.artist_buf[pos] = 0;
                     self.artist = self.artist_buf[0..pos :0];
                     has_artist = true;
+                    break :blk true;
                 }
-            } else if (std.mem.eql(u8, ks, "mpris:length") and vt == 'x') {
+                break :blk false;
+            } else if (std.mem.eql(u8, ks, "mpris:length") and vt == 'x') blk: {
                 var val: i64 = 0;
                 if (bc.sd_bus_message_read(m, "x", &val) > 0) {
                     self.length = val;
                     has_length = true;
+                    break :blk true;
                 }
-            } else if (vt_str) |vs| {
-                // Skip variant content we didn't read
-                _ = bc.sd_bus_message_skip(m, vs);
+                break :blk false;
+            } else false;
+
+            if (!handled) {
+                if (vt_str) |vs| _ = bc.sd_bus_message_skip(m, vs);
             }
 
             _ = bc.sd_bus_message_exit_container(m); // variant
