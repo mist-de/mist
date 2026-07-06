@@ -186,7 +186,6 @@ pub const Bar = struct {
         const col_layer1 = Color.rgba(0x1c, 0x1b, 0x1c, 0xE0);
         const col_on_layer0 = Color.rgba(0xe6, 0xe1, 0xe1, 0xFF);
         const col_on_layer1 = Color.rgba(0xcb, 0xc5, 0xca, 0xFF);
-        const col_on_layer1_inactive = Color.rgba(0x7d, 0x78, 0x7c, 0xFF);
         const col_primary = Color.rgba(0xcb, 0xc4, 0xcb, 0xFF);
         const col_on_primary = Color.rgba(0x32, 0x2f, 0x34, 0xFF);
         const col_secondary_container = Color.rgba(0x4d, 0x4b, 0x4d, 0x99);
@@ -233,13 +232,41 @@ pub const Bar = struct {
             render_mod.renderText(&canvas, f_ptr, window_title, aw_x, row2_y, col_on_layer0);
         }
 
-        // ═══ CENTER: 3 BarGroups ═══
+        // ═══ WORKSPACE STATE ═══
+        const ws_count: usize = 5;
+        const ws_display_count: usize = @min(ws_count, ctx.workspace_count);
+        var occupied_buf: [16]bool = .{false} ** 16;
+        var active_ws: usize = 0;
+        for (0..ws_display_count) |wi| {
+            const ws_info = &ctx.workspaces[wi];
+            occupied_buf[wi] = ws_info.name_len > 0;
+            if (ws_info.active) active_ws = wi;
+        }
+        if (ws_display_count == 0) {
+            occupied_buf[0] = true;
+            occupied_buf[1] = true;
+            occupied_buf[2] = true;
+            active_ws = 0;
+        }
+        const occupied = occupied_buf;
+
+        // ═══ CENTER: 3 BarGroups (dynamic pill workspaces) ═══
         const center_spacing: i32 = 4;
         const center_mod_w: i32 = if (bar_w > 1200) 360 else if (bar_w > 1000) 280 else 190;
-        const ws_btn_size: i32 = 26;
-        const ws_count: i32 = 5;
-        const ws_bargroup_padding: i32 = 4;
-        const ws_w = ws_btn_size * ws_count + ws_bargroup_padding * 2;
+
+        const ws_pill_h: i32 = 20;
+        const ws_inactive_w: i32 = 15;
+        const ws_active_w: i32 = 40;
+        const ws_gap: i32 = 4;
+
+        var ws_total: i32 = 0;
+        for (0..ws_count) |i| {
+            ws_total += if (i == active_ws) ws_active_w else ws_inactive_w;
+        }
+        ws_total += (@as(i32, @intCast(ws_count)) - 1) * ws_gap;
+        const ws_padding: i32 = 4;
+        const ws_w = ws_total + ws_padding * 2;
+
         const total_center = center_mod_w + center_spacing + ws_w + center_spacing + center_mod_w;
         const center_x = @divTrunc(bar_w - total_center, 2);
         const group_bg_y = bar_y + 4;
@@ -283,69 +310,33 @@ pub const Bar = struct {
             }
         }
 
-        // Middle center: Workspaces
+        // Middle center: Workspaces (dynamic pills)
         const mc_x = lc_x + center_mod_w + center_spacing;
         canvas.fillRoundedRect(mc_x, group_bg_y, ws_w, group_bg_h, group_radius, col_layer1);
 
-        const ws_cell_y = bar_y + @divTrunc(bar_h - ws_btn_size, 2);
-        const ws_start_x = mc_x + ws_bargroup_padding;
+        const ws_cell_y = bar_y + @divTrunc(bar_h - ws_pill_h, 2);
+        const pill_radius = @divTrunc(ws_pill_h, 2);
 
-        const ws_display_count: usize = @min(@as(usize, @intCast(ws_count)), ctx.workspace_count);
-        var occupied_buf: [16]bool = .{false} ** 16;
-        var active_ws: usize = 0;
-        for (0..ws_display_count) |wi| {
-            const ws_info = &ctx.workspaces[wi];
-            occupied_buf[wi] = ws_info.name_len > 0;
-            if (ws_info.active) active_ws = wi;
-        }
-        if (ws_display_count == 0) {
-            occupied_buf[0] = true;
-            occupied_buf[1] = true;
-            occupied_buf[2] = true;
-            active_ws = 0;
-        }
-        const occupied = occupied_buf;
-        const half_btn = @divTrunc(ws_btn_size, 2);
+        // Center pills within bargroup
+        var px = mc_x + ws_padding + @divTrunc(ws_total - (ws_total - ws_padding * 2), 2);
+        // Simplify: start from bargroup left + padding, then center offset for leftover space
+        px = mc_x + ws_padding;
 
-        var group_start: ?usize = null;
-        for (0..6) |i| {
-            const at_end = i == 5;
-            if (!at_end and occupied[i]) {
-                if (group_start == null) group_start = i;
-            } else {
-                if (group_start) |start| {
-                    const end = i - 1;
-                    const gx = ws_start_x + @as(i32, @intCast(start)) * ws_btn_size;
-                    const gw = @as(i32, @intCast(end - start + 1)) * ws_btn_size;
-                    if (start == end) {
-                        canvas.fillCircle(gx + half_btn, ws_cell_y + half_btn, half_btn, col_secondary_container);
-                    } else {
-                        canvas.fillRoundedRect(gx, ws_cell_y, gw, ws_btn_size, half_btn, col_secondary_container);
-                    }
-                    group_start = null;
-                }
+        for (0..ws_count) |i| {
+            const is_active = i == active_ws;
+            const is_occ = occupied[i];
+            const w: i32 = if (is_active) ws_active_w else if (is_occ) ws_inactive_w else 8;
+            const color = if (is_active) col_primary else if (is_occ) col_secondary_container else col_outline_variant;
+
+            canvas.fillRoundedRect(px, ws_cell_y, w, ws_pill_h, pill_radius, color);
+
+            if (is_active) {
+                canvas.fillCircle(px + @divTrunc(w, 2), ws_cell_y + @divTrunc(ws_pill_h, 2), 4, col_on_primary);
+            } else if (is_occ) {
+                canvas.fillCircle(px + @divTrunc(w, 2), ws_cell_y + @divTrunc(ws_pill_h, 2), 3, col_on_secondary_container);
             }
-        }
 
-        const ws_active_margin: i32 = 2;
-        const ws_active_size = ws_btn_size - ws_active_margin * 2;
-        {
-            const active_x = ws_start_x + @as(i32, @intCast(active_ws)) * ws_btn_size + ws_active_margin;
-            const active_y = ws_cell_y + ws_active_margin;
-            canvas.fillRoundedRect(active_x, active_y, ws_active_size, ws_active_size, 9999, col_primary);
-        }
-
-        const dot_diam: i32 = 5;
-        const dot_r = @divTrunc(dot_diam, 2);
-        for (0..5) |i| {
-            const btn_x = ws_start_x + @as(i32, @intCast(i)) * ws_btn_size;
-            const dot_color = if (i == active_ws)
-                col_on_primary
-            else if (occupied[i])
-                col_on_secondary_container
-            else
-                col_on_layer1_inactive;
-            canvas.fillCircle(btn_x + half_btn, ws_cell_y + half_btn, dot_r, dot_color);
+            px += w + ws_gap;
         }
 
         // Right center: Clock + Battery
@@ -381,13 +372,16 @@ pub const Bar = struct {
             render_mod.renderText(&canvas, f, "80%", bat_x + 2, tbl, col_on_layer1);
         }
 
-        // ═══ RIGHT: RTL sidebar + system tray ═══
-        var rtl_x: i32 = bar_w - screen_rounding;
+        // ═══ RIGHT: Quick Settings + System Tray (RTL accumulation) ═══
+        var cur_x: i32 = bar_w - screen_rounding;
+
+        // Quick Settings
         const rsb_icon_size: i32 = 19;
         const rsb_spacing: i32 = 15;
-        const rsb_content_w = 6 * rsb_icon_size + 5 * rsb_spacing;
-        const rsb_w = rsb_content_w + 20;
-        const rsb_x = rtl_x - rsb_w;
+        const rsb_icons: i32 = 6;
+        const rsb_content_w = rsb_icons * rsb_icon_size + (rsb_icons - 1) * rsb_spacing;
+        cur_x -= rsb_content_w + 20; // content + 10px padding each side
+        const rsb_x = cur_x;
 
         var icon_x = rsb_x + 10;
         const icon_cy = @divTrunc(bar_h, 2);
@@ -406,13 +400,16 @@ pub const Bar = struct {
             }
         }
 
-        rtl_x = rsb_x - 5;
+        cur_x -= 5; // margin between sections
 
-        const tray_item_size: i32 = 20;
+        // System Tray
         const tray_overflow_size: i32 = 24;
+        const tray_item_size: i32 = 20;
         const tray_col_spacing: i32 = 15;
-        const tray_total_w = tray_overflow_size + tray_col_spacing + 3 * tray_item_size + 2 * tray_col_spacing;
-        const tray_x = rtl_x - tray_total_w;
+        const tray_pinned: i32 = 3;
+        const tray_total_w = tray_overflow_size + tray_col_spacing + tray_pinned * (tray_item_size + tray_col_spacing);
+        cur_x -= tray_total_w;
+        const tray_x = cur_x;
 
         var tix = tray_x;
         canvas.fillCircle(tix + @divTrunc(tray_overflow_size, 2), icon_cy, @divTrunc(tray_overflow_size, 2), col_outline);
@@ -505,34 +502,42 @@ fn handleClick(ctx: *Context, x: i32, y: i32) void {
     const screen_rounding: i32 = 23;
     const center_spacing: i32 = 4;
     const center_mod_w: i32 = if (bar_w > 1200) 360 else if (bar_w > 1000) 280 else 190;
-    const ws_btn_size: i32 = 26;
+    const ws_pill_h: i32 = 20;
+    const ws_inactive_w: i32 = 15;
+    const ws_active_w: i32 = 40;
+    const ws_gap: i32 = 4;
+    const ws_padding: i32 = 4;
     const ws_count: i32 = 5;
-    const ws_bargroup_padding: i32 = 4;
-    const ws_w = ws_btn_size * ws_count + ws_bargroup_padding * 2;
+
+    const active_click_ws = ctx.active_workspace orelse 0;
+    var ws_total: i32 = 0;
+    for (0..@as(usize, @intCast(ws_count))) |i| {
+        ws_total += if (i == active_click_ws) ws_active_w else ws_inactive_w;
+    }
+    ws_total += (ws_count - 1) * ws_gap;
+    const ws_w = ws_total + ws_padding * 2;
+
     const total_center = center_mod_w + center_spacing + ws_w + center_spacing + center_mod_w;
     const center_x = @divTrunc(bar_w - total_center, 2);
-
     const mc_x = center_x + center_mod_w + center_spacing;
-    const ws_start_x = mc_x + ws_bargroup_padding;
-    const ws_cell_y = @divTrunc(bar_h - ws_btn_size, 2);
+    const ws_cell_y = @divTrunc(bar_h - ws_pill_h, 2);
 
-    if (y >= ws_cell_y and y < ws_cell_y + ws_btn_size) {
-        for (0..5) |i| {
-            const btn_x = ws_start_x + @as(i32, @intCast(i)) * ws_btn_size;
-            if (x >= btn_x and x < btn_x + ws_btn_size) {
-                std.log.info("workspace {d} clicked", .{i});
-                if (ctx.active_workspace) |aw| {
-                    ctx.workspaces[aw].handle.deactivate();
-                }
-                if (i < ctx.workspace_count) {
-                    ctx.workspaces[i].handle.activate();
-                    ctx.active_workspace = i;
-                }
-                ctx.roundtrip();
-                markAllDirty(ctx);
-                return;
+    var px = mc_x + ws_padding;
+    for (0..@as(usize, @intCast(ws_count))) |i| {
+        const is_active = ctx.active_workspace != null and ctx.active_workspace.? == i;
+        const w: i32 = if (is_active) ws_active_w else ws_inactive_w;
+        if (y >= ws_cell_y and y < ws_cell_y + ws_pill_h and x >= px and x < px + w) {
+            std.log.info("workspace {d} clicked", .{i});
+            if (ctx.active_workspace) |aw| ctx.workspaces[aw].handle.deactivate();
+            if (i < ctx.workspace_count) {
+                ctx.workspaces[i].handle.activate();
+                ctx.active_workspace = i;
             }
+            ctx.roundtrip();
+            markAllDirty(ctx);
+            return;
         }
+        px += w + ws_gap;
     }
 
     const sidebar_x = screen_rounding;
