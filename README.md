@@ -48,7 +48,7 @@ sudo zypper install wayland-devel wayland-protocols-devel libxkbcommon-devel \
 
 **NixOS:**
 ```sh
-nix-shell --run "zig build ..."
+nix-shell --run "zig build -Doptimize=ReleaseFast -- -lwayland-client -lxkbcommon -lfreetype -lharfbuzz"
 ```
 
 </details>
