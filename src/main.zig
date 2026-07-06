@@ -30,6 +30,7 @@ pub fn main() !void {
         break :blk mpris_mod.MprisPlayer{};
     };
     mpris.tick();
+    ctx.mpris = &mpris;
 
     for (0..ctx.output_count) |i| {
         bar_mod.initOutput(&ctx, i) catch |err| {

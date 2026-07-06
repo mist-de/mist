@@ -8,6 +8,7 @@ const ext = wayland.client.ext;
 const Rect = @import("config.zig").Rect;
 const Color = @import("config.zig").Color;
 const ResourceState = @import("config.zig").ResourceState;
+const mpris_mod = @import("mpris.zig");
 
 pub const CursorShape = wp.CursorShapeDeviceV1.Shape;
 
@@ -105,6 +106,12 @@ pub const Context = struct {
     bar_dirty: bool = false,
     resources: ResourceState = .{},
     resource_counter: u32 = 0,
+
+    /// MPRIS player reference for click dispatch
+    mpris: ?*mpris_mod.MprisPlayer = null,
+    /// Clickable area of the media widget (set during draw, consumed by handleClick)
+    media_area_x0: i32 = 0,
+    media_area_x1: i32 = 0,
 
     allocator: std.mem.Allocator,
 

@@ -142,12 +142,19 @@ pub const MprisPlayer = struct {
 
     fn readMetadata(self: *MprisPlayer, bus: *bc.sd_bus, dest: [*:0]const u8, path: [*:0]const u8, iface: [*:0]const u8, error_val: *bc.sd_bus_error) void {
         var reply: ?*bc.sd_bus_message = null;
-        const rc = bc.sd_bus_get_property(bus, dest, path, iface, "Metadata", error_val, &reply, "a{sv}");
+        const rc = bc.sd_bus_call_method(
+            bus, dest, path, "org.freedesktop.DBus.Properties", "Get",
+            error_val, &reply, "ss", iface, "Metadata",
+        );
         if (rc < 0) return;
         defer _ = bc.sd_bus_message_unref(reply);
         const m = reply.?;
 
-        var rrc = bc.sd_bus_message_enter_container(m, 'a', "{sv}");
+        var prop_type: [*c]const u8 = undefined;
+        var rrc = bc.enter_variant(m, @ptrCast(&prop_type));
+        if (rrc <= 0) return;
+
+        rrc = bc.sd_bus_message_enter_container(m, 'a', "{sv}");
         if (rrc <= 0) return;
 
         var has_title = false;
@@ -170,15 +177,15 @@ pub const MprisPlayer = struct {
             };
             const ks = std.mem.span(k);
 
-            var prop_type: [*c]const u8 = undefined;
-            rrc = bc.enter_variant(m, @ptrCast(&prop_type));
+            var val_type: [*c]const u8 = undefined;
+            rrc = bc.enter_variant(m, @ptrCast(&val_type));
             if (rrc <= 0) {
                 _ = bc.sd_bus_message_exit_container(m);
                 break;
             }
-            const pt = if (prop_type) |p| p[0] else 0;
+            const vt = if (val_type) |p| p[0] else 0;
 
-            if (std.mem.eql(u8, ks, "xesam:title") and pt == 's') {
+            if (std.mem.eql(u8, ks, "xesam:title") and vt == 's') {
                 var val: [*:0]const u8 = undefined;
                 if (bc.sd_bus_message_read(m, "s", &val) > 0) {
                     const vs = std.mem.span(val);
@@ -188,29 +195,31 @@ pub const MprisPlayer = struct {
                     self.title = self.title_buf[0..len :0];
                     has_title = true;
                 }
-            } else if (std.mem.eql(u8, ks, "xesam:artist") and pt == 'a') {
-                _ = bc.sd_bus_message_enter_container(m, 'a', "s");
-                var first = true;
-                var pos: usize = 0;
-                while (pos < self.artist_buf.len) {
-                    var val: [*:0]const u8 = undefined;
-                    if (bc.sd_bus_message_read(m, "s", &val) <= 0) break;
-                    if (!first and pos + 2 <= self.artist_buf.len) {
-                        self.artist_buf[pos] = ',';
-                        self.artist_buf[pos + 1] = ' ';
-                        pos += 2;
+            } else if (std.mem.eql(u8, ks, "xesam:artist") and vt == 'a') {
+                rrc = bc.sd_bus_message_enter_container(m, 'a', "s");
+                if (rrc > 0) {
+                    var first = true;
+                    var pos: usize = 0;
+                    while (pos < self.artist_buf.len) {
+                        var val: [*:0]const u8 = undefined;
+                        if (bc.sd_bus_message_read(m, "s", &val) <= 0) break;
+                        if (!first and pos + 2 <= self.artist_buf.len) {
+                            self.artist_buf[pos] = ',';
+                            self.artist_buf[pos + 1] = ' ';
+                            pos += 2;
+                        }
+                        first = false;
+                        const vs = std.mem.span(val);
+                        const copy_len = @min(vs.len, self.artist_buf.len -| pos);
+                        @memcpy(self.artist_buf[pos..][0..copy_len], vs[0..copy_len]);
+                        pos += copy_len;
                     }
-                    first = false;
-                    const vs = std.mem.span(val);
-                    const copy_len = @min(vs.len, self.artist_buf.len -| pos);
-                    @memcpy(self.artist_buf[pos..][0..copy_len], vs[0..copy_len]);
-                    pos += copy_len;
+                    _ = bc.sd_bus_message_exit_container(m);
+                    self.artist_buf[pos] = 0;
+                    self.artist = self.artist_buf[0..pos :0];
+                    has_artist = true;
                 }
-                _ = bc.sd_bus_message_exit_container(m);
-                self.artist_buf[pos] = 0;
-                self.artist = self.artist_buf[0..pos :0];
-                has_artist = true;
-            } else if (std.mem.eql(u8, ks, "mpris:length") and pt == 'x') {
+            } else if (std.mem.eql(u8, ks, "mpris:length") and vt == 'x') {
                 var val: i64 = 0;
                 if (bc.sd_bus_message_read(m, "x", &val) > 0) {
                     self.length = val;
@@ -222,6 +231,7 @@ pub const MprisPlayer = struct {
             _ = bc.sd_bus_message_exit_container(m); // dict entry
         }
         _ = bc.sd_bus_message_exit_container(m); // array
+        _ = bc.sd_bus_message_exit_container(m); // variant
 
         if (has_title or has_artist or has_length) self.changed = true;
     }

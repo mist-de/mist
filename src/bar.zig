@@ -346,6 +346,8 @@ pub const Bar = struct {
 
         // Optional media widget when module is wide enough (end-4 Media.qml)
         if (centerSideModuleWidth > 200) {
+            ctx.media_area_x0 = resX;
+            ctx.media_area_x1 = lcX + centerSideModuleWidth;
             resX += 8;
             const mediaRingCX: i32 = resX + 10;
             const mediaProgress: f32 = 0.42; // placeholder: 42% progress
@@ -637,7 +639,7 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
         },
         .button => |btn| {
             if (btn.state == .pressed) {
-                handleClick(ctx, ctx.pointer_x, ctx.pointer_y);
+                handleClick(ctx, ctx.pointer_x, ctx.pointer_y, btn.button);
             }
         },
         .leave => {
@@ -657,7 +659,7 @@ fn keyboardListener(kb: *wl.Keyboard, event: wl.Keyboard.Event, ctx: *Context) v
     }
 }
 
-fn handleClick(ctx: *Context, x: i32, y: i32) void {
+fn handleClick(ctx: *Context, x: i32, y: i32, button: u32) void {
     const bar_h: i32 = 40;
     const bar_w: i32 = ctx.outputs[0].mode_w;
     const screenRounding: i32 = 23;
@@ -675,6 +677,20 @@ fn handleClick(ctx: *Context, x: i32, y: i32) void {
     const mcX: i32 = centerX + centerModW + centerSpacing;
     const wsCellX: i32 = mcX + wsBarGroupPadding;
     const wsY: i32 = centerY - @divTrunc(wsBtnWidth, 2);
+
+    // Media player controls (end-4: left=playPause, right/forward=next, back=prev)
+    if (x >= ctx.media_area_x0 and x < ctx.media_area_x1 and y >= 0 and y < bar_h) {
+        if (ctx.mpris) |mpris| {
+            if (button == 0x110) { // BTN_LEFT
+                mpris.playPause();
+            } else if (button == 0x111 or button == 0x117) { // BTN_RIGHT or BTN_FORWARD
+                mpris.next();
+            } else if (button == 0x116) { // BTN_BACK
+                mpris.previous();
+            }
+        }
+        return;
+    }
 
     // Workspace click detection (fixed 26px buttons)
     for (0..@as(usize, @intCast(wsCount))) |i| {
