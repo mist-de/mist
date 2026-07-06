@@ -5,7 +5,7 @@
 
 > **Early development. Not stable.**
 
-A minimal Wayland desktop environment shell written in Zig — inspired by [end-4](https://github.com/end-4/dots). Pure software rendering via `wl_shm`. Zero GPU. Zero GLib.
+A minimal Wayland desktop environment shell written in Zig — inspired by [end-4](https://github.com/end-4/dots-hyprland). Pure software rendering via `wl_shm`. Zero GPU. Zero GLib.
 
 - Pure CPU rendering — no GPU required
 - Zero GLib dependencies — no GTK/GNOME baggage
