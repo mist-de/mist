@@ -111,6 +111,7 @@ pub const Bar = struct {
     rect: Rect = .zero,
     font: ?Font = null,
     font_icon: ?Font = null,
+    font_material: ?Font = null,
     needs_full_redraw: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, ctx: *Context, output_idx: usize, name: []const u8) !Bar {
@@ -137,10 +138,15 @@ pub const Bar = struct {
                 defer allocator.free(fp);
                 bar.font_icon = Font.init(allocator, fp, cfg.font_size) catch null;
             } else |_| {}
+            if (config_mod.resolveFontPath(allocator, cfg.font_material)) |fp| {
+                defer allocator.free(fp);
+                bar.font_material = Font.init(allocator, fp, cfg.font_size) catch null;
+            } else |_| {}
         }
 
         if (bar.font == null) std.log.err("NO REGULAR FONT LOADED", .{});
         if (bar.font_icon == null) std.log.err("NO ICON FONT LOADED", .{});
+        if (bar.font_material == null) std.log.err("NO MATERIAL FONT LOADED", .{});
 
         return bar;
     }
@@ -149,6 +155,7 @@ pub const Bar = struct {
         if (self.buffer) |*b| b.deinit();
         if (self.font) |*f| f.deinit();
         if (self.font_icon) |*f| f.deinit();
+        if (self.font_material) |*f| f.deinit();
         self.layer.destroy();
     }
 
@@ -194,10 +201,15 @@ pub const Bar = struct {
         // ═══ LEFT: Sidebar button + Active window title ═══
         const sidebar_x: i32 = screen_rounding;
         const sidebar_btn_size: i32 = 30;
-        const sidebar_icon_r: i32 = 10;
-        const sidebar_cx = sidebar_x + @divTrunc(sidebar_btn_size, 2);
-        const sidebar_cy = @divTrunc(bar_h, 2);
-        canvas.fillCircle(sidebar_cx, sidebar_cy, sidebar_icon_r, col_on_layer0);
+
+        if (self.font_icon) |*f_icon| {
+            const tbl = @divTrunc(bar_h - f_icon.lineHeight(), 2) + f_icon.baselineOffset();
+            text_mod.renderText(&canvas, f_icon, "\u{F313}", sidebar_x + 8, tbl, col_on_layer0);
+        } else {
+            const sidebar_cx = sidebar_x + @divTrunc(sidebar_btn_size, 2);
+            const sidebar_cy = @divTrunc(bar_h, 2);
+            canvas.fillCircle(sidebar_cx, sidebar_cy, 10, col_on_layer0);
+        }
 
         const aw_x = sidebar_x + sidebar_btn_size + 10;
         const aw_right_limit = @divTrunc(bar_w, 2) - 80;
@@ -379,9 +391,19 @@ pub const Bar = struct {
 
         var icon_x = rsb_x + 10;
         const icon_cy = @divTrunc(bar_h, 2);
-        for (0..6) |_| {
-            canvas.fillRect(icon_x, icon_cy - @divTrunc(rsb_icon_size, 2), rsb_icon_size, rsb_icon_size, col_on_layer0);
-            icon_x += rsb_icon_size + rsb_spacing;
+
+        if (self.font_material) |*f_mat| {
+            const tbl = @divTrunc(bar_h - f_mat.lineHeight(), 2) + f_mat.baselineOffset();
+            const quick_settings = [_][]const u8{ "network_wifi", "bluetooth", "volume_up", "mic", "battery_5_bar", "notifications" };
+            for (quick_settings) |icon_str| {
+                text_mod.renderText(&canvas, f_mat, icon_str, icon_x, tbl, col_on_layer0);
+                icon_x += rsb_icon_size + rsb_spacing;
+            }
+        } else {
+            for (0..6) |_| {
+                canvas.fillRect(icon_x, icon_cy - @divTrunc(rsb_icon_size, 2), rsb_icon_size, rsb_icon_size, col_on_layer0);
+                icon_x += rsb_icon_size + rsb_spacing;
+            }
         }
 
         rtl_x = rsb_x - 5;
