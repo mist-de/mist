@@ -9,9 +9,8 @@ A minimal Wayland desktop environment shell written in Zig — inspired by [end-
 
 - Pure CPU rendering — no GPU required
 - Zero GLib dependencies — no GTK/GNOME baggage
-- FreeType + HarfBuzz for text via @cImport (Ghostty pattern)
-- MPRIS media detection via basu (sd-bus, zero GLib)
-- ~530 KB stripped binary
+- FreeType + HarfBuzz for text via @cImport
+- MPRIS media detection via basu
 
 ## Quick Start
 
