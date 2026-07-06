@@ -142,23 +142,14 @@ pub const MprisPlayer = struct {
 
     fn readMetadata(self: *MprisPlayer, bus: *bc.sd_bus, dest: [*:0]const u8, path: [*:0]const u8, iface: [*:0]const u8, error_val: *bc.sd_bus_error) void {
         var reply: ?*bc.sd_bus_message = null;
-        const rc = bc.sd_bus_call_method(
-            bus, dest, path, "org.freedesktop.DBus.Properties", "Get",
-            error_val, &reply, "ss", iface, "Metadata",
-        );
+        // sd_bus_get_property enters the variant internally, cursor at array
+        const rc = bc.sd_bus_get_property(bus, dest, path, iface, "Metadata", error_val, &reply, "a{sv}");
         if (rc < 0) return;
         defer _ = bc.sd_bus_message_unref(reply);
         const m = reply.?;
 
-        var sig: [*c]const u8 = undefined;
-        var rrc = bc.enter_variant(m, @ptrCast(&sig));
+        var rrc = bc.sd_bus_message_enter_container(m, 'a', "{sv}");
         if (rrc <= 0) return;
-
-        rrc = bc.sd_bus_message_enter_container(m, 'a', "{sv}");
-        if (rrc <= 0) {
-            _ = bc.sd_bus_message_exit_container(m);
-            return;
-        }
 
         var has_title = false;
         var has_artist = false;
@@ -180,13 +171,21 @@ pub const MprisPlayer = struct {
             };
             const ks = std.mem.span(k);
 
-            var val_type: [*c]const u8 = undefined;
-            rrc = bc.enter_variant(m, @ptrCast(&val_type));
+            // Peek variant type before entering (StackOverflow pattern)
+            var vt_str: [*c]const u8 = undefined;
+            rrc = bc.sd_bus_message_peek_type(m, null, @ptrCast(&vt_str));
             if (rrc <= 0) {
                 _ = bc.sd_bus_message_exit_container(m);
                 break;
             }
-            const vt = if (val_type) |p| p[0] else 0;
+            const vt = if (vt_str) |p| p[0] else 0;
+
+            // Enter variant with peeked type as expected contents
+            rrc = bc.sd_bus_message_enter_container(m, 'v', vt_str);
+            if (rrc <= 0) {
+                _ = bc.sd_bus_message_exit_container(m);
+                break;
+            }
 
             if (std.mem.eql(u8, ks, "xesam:title") and vt == 's') {
                 var val: [*:0]const u8 = undefined;
@@ -228,19 +227,15 @@ pub const MprisPlayer = struct {
                     self.length = val;
                     has_length = true;
                 }
-            } else if (vt != 0) {
-                // Must consume variant content before exiting container.
-                // sd_bus_message_skip interprets the type string as individual
-                // elements, so we pass only the first char (e.g. "a" for "as")
-                var skip_type: [2]u8 = .{ vt, 0 };
-                _ = bc.sd_bus_message_skip(m, @ptrCast(&skip_type));
+            } else if (vt_str) |vs| {
+                // Skip variant content we didn't read
+                _ = bc.sd_bus_message_skip(m, vs);
             }
 
             _ = bc.sd_bus_message_exit_container(m); // variant
             _ = bc.sd_bus_message_exit_container(m); // dict entry
         }
         _ = bc.sd_bus_message_exit_container(m); // array
-        _ = bc.sd_bus_message_exit_container(m); // variant
 
         if (has_title or has_artist or has_length) self.changed = true;
     }
