@@ -99,15 +99,14 @@ pub const MprisPlayer = struct {
     }
 
     fn readProperties(self: *MprisPlayer, bus: *bc.sd_bus) void {
-        var error_val: bc.sd_bus_error = std.mem.zeroes(bc.sd_bus_error);
-        defer bc.sd_bus_error_free(&error_val);
-
         const dest = @as([*:0]const u8, @ptrCast(self.name.ptr));
         const path: [*:0]const u8 = "/org/mpris/MediaPlayer2";
         const iface_player: [*:0]const u8 = "org.mpris.MediaPlayer2.Player";
 
         // PlaybackStatus via sd_bus_get_property_string
         {
+            var error_val: bc.sd_bus_error = std.mem.zeroes(bc.sd_bus_error);
+            defer bc.sd_bus_error_free(&error_val);
             var status_str: [*c]u8 = null;
             const r = bc.sd_bus_get_property_string(bus, dest, path, iface_player, "PlaybackStatus", &error_val, &status_str);
             if (r >= 0) {
@@ -123,6 +122,8 @@ pub const MprisPlayer = struct {
 
         // Position via sd_bus_get_property_trivial (type 'x' = int64)
         {
+            var error_val: bc.sd_bus_error = std.mem.zeroes(bc.sd_bus_error);
+            defer bc.sd_bus_error_free(&error_val);
             var pos: i64 = 0;
             const r = bc.sd_bus_get_property_trivial(bus, dest, path, iface_player, "Position", &error_val, 'x', @ptrCast(&pos));
             if (r >= 0) {
@@ -132,14 +133,30 @@ pub const MprisPlayer = struct {
         }
 
         // Metadata via sd_bus_get_property with type "a{sv}" — manual dict parsing
-        self.readMetadata(bus, dest, path, iface_player, &error_val);
+        self.readMetadata(bus, dest, path, iface_player);
     }
 
-    fn readMetadata(self: *MprisPlayer, bus: *bc.sd_bus, dest: [*:0]const u8, path: [*:0]const u8, iface: [*:0]const u8, error_val: *bc.sd_bus_error) void {
+    fn readMetadata(self: *MprisPlayer, bus: *bc.sd_bus, dest: [*:0]const u8, path: [*:0]const u8, iface: [*:0]const u8) void {
+        var error_val: bc.sd_bus_error = std.mem.zeroes(bc.sd_bus_error);
+        defer bc.sd_bus_error_free(&error_val);
+
         var reply: ?*bc.sd_bus_message = null;
         // sd_bus_get_property enters the variant internally, cursor at array
-        const rc = bc.sd_bus_get_property(bus, dest, path, iface, "Metadata", error_val, &reply, "a{sv}");
-        if (rc < 0) return;
+        var rc = bc.sd_bus_get_property(bus, dest, path, iface, "Metadata", &error_val, &reply, "a{sv}");
+        // Fallback: try sd_bus_call_method if get_property fails
+        if (rc < 0) {
+            bc.sd_bus_error_free(&error_val);
+            error_val = std.mem.zeroes(bc.sd_bus_error);
+            rc = bc.sd_bus_call_method(bus, dest, path, "org.freedesktop.DBus.Properties", "Get",
+                &error_val, &reply, "ss", iface, "Metadata");
+            if (rc < 0) return;
+            // Enter the variant that contains the a{sv} dict
+            rc = bc.sd_bus_message_enter_container(reply, 'v', "a{sv}");
+            if (rc <= 0) {
+                _ = bc.sd_bus_message_unref(reply);
+                return;
+            }
+        }
         defer _ = bc.sd_bus_message_unref(reply);
         const m = reply.?;
 
@@ -244,28 +261,37 @@ pub const MprisPlayer = struct {
 
     pub fn playPause(self: *MprisPlayer) void {
         const b = self.bus orelse return;
+        if (!self.has_player or self.name.len == 0) return;
         var error_val: bc.sd_bus_error = std.mem.zeroes(bc.sd_bus_error);
         defer bc.sd_bus_error_free(&error_val);
-        _ = bc.sd_bus_call_method(b, self.name, "/org/mpris/MediaPlayer2",
+        var reply: ?*bc.sd_bus_message = null;
+        _ = bc.sd_bus_call_method(b, self.name.ptr, "/org/mpris/MediaPlayer2",
             "org.mpris.MediaPlayer2.Player", "PlayPause",
-            &error_val, null, null);
+            &error_val, &reply, null);
+        if (reply) |r| _ = bc.sd_bus_message_unref(r);
     }
 
     pub fn next(self: *MprisPlayer) void {
         const b = self.bus orelse return;
+        if (!self.has_player or self.name.len == 0) return;
         var error_val: bc.sd_bus_error = std.mem.zeroes(bc.sd_bus_error);
         defer bc.sd_bus_error_free(&error_val);
-        _ = bc.sd_bus_call_method(b, self.name, "/org/mpris/MediaPlayer2",
+        var reply: ?*bc.sd_bus_message = null;
+        _ = bc.sd_bus_call_method(b, self.name.ptr, "/org/mpris/MediaPlayer2",
             "org.mpris.MediaPlayer2.Player", "Next",
-            &error_val, null, null);
+            &error_val, &reply, null);
+        if (reply) |r| _ = bc.sd_bus_message_unref(r);
     }
 
     pub fn previous(self: *MprisPlayer) void {
         const b = self.bus orelse return;
+        if (!self.has_player or self.name.len == 0) return;
         var error_val: bc.sd_bus_error = std.mem.zeroes(bc.sd_bus_error);
         defer bc.sd_bus_error_free(&error_val);
-        _ = bc.sd_bus_call_method(b, self.name, "/org/mpris/MediaPlayer2",
+        var reply: ?*bc.sd_bus_message = null;
+        _ = bc.sd_bus_call_method(b, self.name.ptr, "/org/mpris/MediaPlayer2",
             "org.mpris.MediaPlayer2.Player", "Previous",
-            &error_val, null, null);
+            &error_val, &reply, null);
+        if (reply) |r| _ = bc.sd_bus_message_unref(r);
     }
 };

@@ -307,10 +307,11 @@ pub const Bar = struct {
 
         var resX: i32 = lcX + groupPadding + 4;
         const res = &ctx.resources;
+        const hasMediaTrack = mpris.has_player and mpris.title.len > 0;
         const resData = [_]struct { icon: []const u8, pct: f32, skip: bool }{
             .{ .icon = "memory", .pct = res.memory_used_pct, .skip = false },
-            .{ .icon = "swap_horiz", .pct = res.swap_used_pct, .skip = res.swap_total_kb == 0 },
-            .{ .icon = "planner_review", .pct = res.cpu_usage, .skip = false },
+            .{ .icon = "swap_horiz", .pct = res.swap_used_pct, .skip = res.swap_total_kb == 0 or hasMediaTrack },
+            .{ .icon = "planner_review", .pct = res.cpu_usage, .skip = hasMediaTrack },
         };
         const half_pi: f32 = @as(f32, std.math.pi) / 2.0;
         const two_pi: f32 = 2.0 * @as(f32, std.math.pi);
