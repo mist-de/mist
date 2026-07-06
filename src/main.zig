@@ -2,8 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 
 const Context = @import("wl.zig").Context;
-const input = @import("input.zig");
-const output_mod = @import("output.zig");
+const bar_mod = @import("bar.zig");
 const config_mod = @import("config.zig");
 
 pub fn main() !void {
@@ -18,20 +17,20 @@ pub fn main() !void {
     defer ctx.deinit();
 
     if (ctx.seat) |s| {
-        s.setListener(*Context, input.seatListener, &ctx);
+        s.setListener(*Context, bar_mod.seatListener, &ctx);
     }
 
     ctx.roundtrip();
     std.log.info("outputs: {d}", .{ctx.output_count});
 
     for (0..ctx.output_count) |i| {
-        output_mod.initOutput(&ctx, i) catch |err| {
+        bar_mod.initOutput(&ctx, i) catch |err| {
             std.log.warn("output {d}: {s}", .{ i, @errorName(err) });
         };
     }
 
     ctx.roundtrip();
-    output_mod.drawOutputs(&ctx);
+    bar_mod.drawOutputs(&ctx);
 
     const wayland_fd = ctx.getFd();
 
@@ -55,9 +54,9 @@ pub fn main() !void {
         }
 
         // Only redraw if any bar was marked dirty by a configure event
-        output_mod.drawOutputs(&ctx);
+        bar_mod.drawOutputs(&ctx);
     }
 
-    output_mod.deinit();
+    bar_mod.deinitOutputs();
     std.log.info("shutdown", .{});
 }

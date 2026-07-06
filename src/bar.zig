@@ -6,6 +6,7 @@ const zwlr = wayland.client.zwlr;
 const Context = @import("wl.zig").Context;
 const LayerSurface = @import("wl.zig").LayerSurface;
 const ShmBuffer = @import("wl.zig").ShmBuffer;
+const CursorShape = @import("wl.zig").CursorShape;
 const Canvas = @import("render.zig").Canvas;
 const config_mod = @import("config.zig");
 const Color = config_mod.Color;
@@ -13,6 +14,82 @@ const Appearance = config_mod.Appearance;
 const Rect = config_mod.Rect;
 const Font = @import("text.zig").Font;
 const text_mod = @import("text.zig");
+
+// ═══════════════════════════════════════════════════════════
+// OutputState — per-output bar lifecycle
+// ═══════════════════════════════════════════════════════════
+
+pub const OutputState = struct {
+    bar: ?Bar = null,
+    output_idx: usize,
+    name: [64]u8 = .{0} ** 64,
+    configured: bool = false,
+};
+
+var outputs: [8]OutputState = undefined;
+var output_count: usize = 0;
+
+pub fn initOutput(ctx: *Context, output_idx: usize) !void {
+    const name = std.mem.sliceTo(&ctx.outputs[output_idx].name, 0);
+    if (output_count < 8) {
+        outputs[output_count] = .{ .output_idx = output_idx };
+        const name_len = @min(name.len, outputs[output_count].name.len - 1);
+        @memcpy(outputs[output_count].name[0..name_len], name[0..name_len]);
+        output_count += 1;
+    }
+    try ensureBar(ctx, output_idx);
+}
+
+fn ensureBar(ctx: *Context, output_idx: usize) !void {
+    const name = std.mem.sliceTo(&ctx.outputs[output_idx].name, 0);
+    for (0..output_count) |i| {
+        const out = &outputs[i];
+        if (out.output_idx != output_idx) continue;
+        if (out.bar != null) return;
+
+        out.bar = try Bar.init(ctx.allocator, ctx, output_idx, name);
+        if (out.bar) |*bar| {
+            if (bar.layer.layer_surface) |ls| {
+                ls.setListener(*Bar, Bar.layerSurfaceListener, bar);
+            }
+        }
+        break;
+    }
+}
+
+pub fn drawOutputs(ctx: *Context) void {
+    for (0..output_count) |i| {
+        const out = &outputs[i];
+        if (out.bar == null) continue;
+        const output_info = &ctx.outputs[out.output_idx];
+        const width = output_info.mode_w;
+        if (width <= 0) continue;
+
+        const bar = &out.bar.?;
+        bar.ensureBuffer(ctx, width) catch continue;
+        bar.draw(ctx) catch |err| {
+            std.log.warn("draw: {s}", .{@errorName(err)});
+        };
+    }
+}
+
+pub fn deinitOutputs() void {
+    for (0..output_count) |i| {
+        if (outputs[i].bar) |*b| b.deinit();
+    }
+    output_count = 0;
+}
+
+pub fn markAllDirty(ctx: *Context) void {
+    _ = ctx;
+    for (0..output_count) |i| {
+        if (outputs[i].bar) |*bar| bar.needs_full_redraw = true;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Bar — widget drawing and layout
+// ═══════════════════════════════════════════════════════════
 
 pub const Bar = struct {
     pub fn layerSurfaceListener(ls: *zwlr.LayerSurfaceV1, event: zwlr.LayerSurfaceV1.Event, bar: *Bar) void {
@@ -51,25 +128,18 @@ pub const Bar = struct {
         bar.layer = try LayerSurface.create(ctx, output, anchor, cfg.height);
         bar.rect = .{ .x = 0, .y = 0, .width = 0, .height = cfg.height };
 
-        // Load fonts with error logging
         {
             if (config_mod.resolveFontPath(allocator, cfg.font_regular)) |fp| {
                 defer allocator.free(fp);
-                bar.font = Font.init(allocator, fp, cfg.font_size) catch |err| blk: {
-                    std.log.err("Failed to load regular font '{s}': {any}", .{ fp, err });
-                    break :blk null;
-                };
+                bar.font = Font.init(allocator, fp, cfg.font_size) catch null;
             } else |_| {}
             if (config_mod.resolveFontPath(allocator, cfg.font_icon)) |fp| {
                 defer allocator.free(fp);
-                bar.font_icon = Font.init(allocator, fp, cfg.font_size) catch |err| blk: {
-                    std.log.err("Failed to load icon font '{s}': {any}", .{ fp, err });
-                    break :blk null;
-                };
+                bar.font_icon = Font.init(allocator, fp, cfg.font_size) catch null;
             } else |_| {}
         }
 
-        if (bar.font == null) std.log.err("NO REGULAR FONT LOADED - text will not render", .{});
+        if (bar.font == null) std.log.err("NO REGULAR FONT LOADED", .{});
         if (bar.font_icon == null) std.log.err("NO ICON FONT LOADED", .{});
 
         return bar;
@@ -106,9 +176,6 @@ pub const Bar = struct {
 
         canvas.fill(Color.transparent);
 
-        // ════════════════════════════════════════════════════════
-        // Exact M3 colors from end-4 Appearance.qml
-        // ════════════════════════════════════════════════════════
         const col_layer1 = Color.rgba(0x1c, 0x1b, 0x1c, 0xE0);
         const col_on_layer0 = Color.rgba(0xe6, 0xe1, 0xe1, 0xFF);
         const col_on_layer1 = Color.rgba(0xcb, 0xc5, 0xca, 0xFF);
@@ -119,38 +186,28 @@ pub const Bar = struct {
         const col_on_secondary_container = Color.rgba(0xec, 0xe6, 0xe9, 0xFF);
         const col_outline_variant = Color.rgba(0x49, 0x46, 0x4a, 0xFF);
         const col_outline = Color.rgba(0x94, 0x8f, 0x94, 0xFF);
-        const col_subtext = col_outline; // colSubtext = m3outline
+        const col_subtext = col_outline;
 
         const bar_y: i32 = 0;
         const screen_rounding: i32 = 23;
 
-        // ════════════════════════════════════════════════════════
-        // LEFT SECTION: Sidebar button + Active window title
-        // ════════════════════════════════════════════════════════
-        // LeftSidebarButton: RippleButton, full radius (9999)
-        // customIcon 19.5x19.5, buttonPadding 5 → total ~30px
-        // Layout.leftMargin = screenRounding = 23
+        // ═══ LEFT: Sidebar button + Active window title ═══
         const sidebar_x: i32 = screen_rounding;
         const sidebar_btn_size: i32 = 30;
-        const sidebar_icon_r: i32 = 10; // 19.5/2 ≈ 10
+        const sidebar_icon_r: i32 = 10;
         const sidebar_cx = sidebar_x + @divTrunc(sidebar_btn_size, 2);
         const sidebar_cy = @divTrunc(bar_h, 2);
-        // Icon: colOnLayer0, circle
         canvas.fillCircle(sidebar_cx, sidebar_cy, sidebar_icon_r, col_on_layer0);
 
-        // ActiveWindow: ColumnLayout spacing=-4 (overlapping rows)
-        // Layout.leftMargin=10, Layout.rightMargin=screenRounding
         const aw_x = sidebar_x + sidebar_btn_size + 10;
         const aw_right_limit = @divTrunc(bar_w, 2) - 80;
         if (aw_right_limit > aw_x and self.font != null) {
             const f_ptr = &self.font.?;
-
             const group_h = 12 + 15 - 4;
             const group_top = @divTrunc(bar_h - group_h, 2);
             const row1_y = group_top + 12;
             const row2_y = row1_y - 4 + 15;
 
-            // Get live window info from foreign toplevel
             const app_name: []const u8 = if (ctx.active_toplevel) |at|
                 std.mem.sliceTo(&ctx.toplevels[at].app_id, 0)
             else
@@ -164,94 +221,71 @@ pub const Bar = struct {
             text_mod.renderText(&canvas, f_ptr, window_title, aw_x, row2_y, col_on_layer0);
         }
 
-        // ════════════════════════════════════════════════════════
-        // CENTER SECTION: 3 BarGroups in a Row with spacing=4
-        // ════════════════════════════════════════════════════════
+        // ═══ CENTER: 3 BarGroups ═══
         const center_spacing: i32 = 4;
         const center_mod_w: i32 = if (bar_w > 1200) 360 else if (bar_w > 1000) 280 else 190;
-
-        // Workspaces: 26px buttons, 4px padding inside BarGroup
         const ws_btn_size: i32 = 26;
         const ws_count: i32 = 5;
         const ws_bargroup_padding: i32 = 4;
         const ws_w = ws_btn_size * ws_count + ws_bargroup_padding * 2;
-
         const total_center = center_mod_w + center_spacing + ws_w + center_spacing + center_mod_w;
         const center_x = @divTrunc(bar_w - total_center, 2);
-
-        // BarGroup background: 4px vertical margin, 12px radius
         const group_bg_y = bar_y + 4;
         const group_bg_h = bar_h - 8;
         const group_radius: i32 = 12;
 
-        // ── LEFT CENTER GROUP: Resources + Media ──
+        // Left center: Resources + Media
         const lc_x = center_x;
         canvas.fillRoundedRect(lc_x, group_bg_y, center_mod_w, group_bg_h, group_radius, col_layer1);
 
-        // Resources: 3 items, each with 20px ring + 2px spacing + text
-        // Resources wrapper: leftMargin=4, rightMargin=4
-        // Between resources: Layout.leftMargin=6 when shown
-        var res_x = lc_x + 5; // 4px margin + 1px extra for visual
+        var res_x = lc_x + 5;
         const res_center_y = @divTrunc(bar_h, 2);
-
         for (0..3) |ri| {
-            // ClippedFilledCircularProgress: 20px, lineWidth=2
-            // arcRadius = 10 - 1 - 0.5 = 8.5
             const ring_outer: i32 = 10;
-            const ring_inner: i32 = 8; // outer - lineWidth = 10 - 2 = 8
+            const ring_inner: i32 = 8;
             const ring_cx = res_x + ring_outer;
             const ring_cy = res_center_y;
-
-            // Track: outline_variant
             canvas.fillRing(ring_cx, ring_cy, ring_inner, ring_outer, col_outline_variant);
-            // Progress: colOnSecondaryContainer, full circle placeholder
             canvas.fillRing(ring_cx, ring_cy, ring_inner, ring_outer - 1, col_on_secondary_container);
-            // Center dot: MaterialSymbol 16px → 3px radius placeholder
             canvas.fillCircle(ring_cx, ring_cy, 3, col_on_secondary_container);
-
-            // Percentage text "52" (colOnLayer1, 15px)
             if (self.font) |*f| {
                 const tbl = @divTrunc(bar_h - f.lineHeight(), 2) + f.baselineOffset();
                 text_mod.renderText(&canvas, f, "52", res_x + ring_outer * 2 + 2, tbl, col_on_layer1);
             }
-            res_x += 42; // 20px ring + 2px spacing + 20px text area
-            if (ri < 2) res_x += 6; // inter-resource margin
+            res_x += 42;
+            if (ri < 2) res_x += 6;
         }
 
-        // Media: 20px ring + 4px spacing + song title
         if (center_mod_w > 200) {
             res_x += 6;
             const media_ring_cx = res_x + 10;
             canvas.fillRing(media_ring_cx, res_center_y, 8, 10, col_outline_variant);
             canvas.fillRing(media_ring_cx, res_center_y, 8, 9, col_on_secondary_container);
             canvas.fillCircle(media_ring_cx, res_center_y, 3, col_on_secondary_container);
-            res_x += 24; // 20px ring + 4px spacing
+            res_x += 24;
             const media_text_w = lc_x + center_mod_w - res_x - 5;
-            if (media_text_w > 10) {
-                if (self.font) |*f| {
-                    const tbl = @divTrunc(bar_h - f.lineHeight(), 2) + f.baselineOffset();
-                    text_mod.renderText(&canvas, f, "Song Title", res_x, tbl, col_on_layer1);
-                }
+            if (media_text_w > 10 and self.font != null) {
+                const f_ptr = &self.font.?;
+                const tbl = @divTrunc(bar_h - f_ptr.lineHeight(), 2) + f_ptr.baselineOffset();
+                text_mod.renderText(&canvas, f_ptr, "Song Title", res_x, tbl, col_on_layer1);
             }
         }
 
-        // ── MIDDLE CENTER GROUP: Workspaces ──
+        // Middle center: Workspaces
         const mc_x = lc_x + center_mod_w + center_spacing;
         canvas.fillRoundedRect(mc_x, group_bg_y, ws_w, group_bg_h, group_radius, col_layer1);
 
         const ws_cell_y = bar_y + @divTrunc(bar_h - ws_btn_size, 2);
         const ws_start_x = mc_x + ws_bargroup_padding;
 
-        // Use live workspace data from workspace protocol
         const ws_display_count: usize = @min(@as(usize, @intCast(ws_count)), ctx.workspace_count);
         var occupied_buf: [16]bool = .{false} ** 16;
         var active_ws: usize = 0;
         for (0..ws_display_count) |wi| {
             const ws_info = &ctx.workspaces[wi];
-            occupied_buf[wi] = ws_info.name_len > 0; // has a name = exists
+            occupied_buf[wi] = ws_info.name_len > 0;
             if (ws_info.active) active_ws = wi;
         }
-        // Fallback: if no workspace data, show 3 occupied + 2 empty
         if (ws_display_count == 0) {
             occupied_buf[0] = true;
             occupied_buf[1] = true;
@@ -259,10 +293,8 @@ pub const Bar = struct {
             active_ws = 0;
         }
         const occupied = occupied_buf;
-
         const half_btn = @divTrunc(ws_btn_size, 2);
 
-        // Occupied backgrounds as grouped rounded rects (NO alpha overlap)
         var group_start: ?usize = null;
         for (0..6) |i| {
             const at_end = i == 5;
@@ -283,7 +315,6 @@ pub const Bar = struct {
             }
         }
 
-        // Active workspace indicator: 22x22 pill, colPrimary, 2px margin
         const ws_active_margin: i32 = 2;
         const ws_active_size = ws_btn_size - ws_active_margin * 2;
         {
@@ -292,37 +323,27 @@ pub const Bar = struct {
             canvas.fillRoundedRect(active_x, active_y, ws_active_size, ws_active_size, 9999, col_primary);
         }
 
-        // Workspace dots: 5px diameter (26 * 0.18 ≈ 4.68)
         const dot_diam: i32 = 5;
         const dot_r = @divTrunc(dot_diam, 2);
         for (0..5) |i| {
             const btn_x = ws_start_x + @as(i32, @intCast(i)) * ws_btn_size;
-            const dot_cx = btn_x + half_btn;
-            const dot_cy = ws_cell_y + half_btn;
             const dot_color = if (i == active_ws)
                 col_on_primary
             else if (occupied[i])
                 col_on_secondary_container
             else
                 col_on_layer1_inactive;
-            canvas.fillCircle(dot_cx, dot_cy, dot_r, dot_color);
+            canvas.fillCircle(btn_x + half_btn, ws_cell_y + half_btn, dot_r, dot_color);
         }
 
-        // ── RIGHT CENTER GROUP: Clock + Battery ──
+        // Right center: Clock + Battery
         const rc_x = mc_x + ws_w + center_spacing;
         canvas.fillRoundedRect(rc_x, group_bg_y, center_mod_w, group_bg_h, group_radius, col_layer1);
 
-        // BatteryIndicator: ClippedProgressBar, centered in parent
-        // valueBarWidth=30, valueBarHeight=18, radius=9999 (pill)
-        const bat_w: i32 = 30;
-        const bat_h: i32 = 18;
-
-        // ClockWidget: RowLayout spacing=4, centered
-        // Time (large=17px) + "•" (small=15px) + Date (small=15px)
         if (self.font) |*f| {
             const tbl = @divTrunc(bar_h - f.lineHeight(), 2) + f.baselineOffset();
             const clock_str = "12:34";
-            const sep_str = "•";
+            const sep_str = "\u{2022}";
             const date_str = "Mon 6 Jul";
             const clock_w = text_mod.textWidth(f, clock_str);
             const sep_w = text_mod.textWidth(f, sep_str);
@@ -336,73 +357,49 @@ pub const Bar = struct {
             text_mod.renderText(&canvas, f, date_str, cx, tbl, col_on_layer1);
         }
 
-        // Battery (right-aligned in group)
+        const bat_w: i32 = 30;
+        const bat_h: i32 = 18;
         const bat_x = rc_x + center_mod_w - bat_w - 8;
         const bat_y_pos = @divTrunc(bar_h - bat_h, 2);
-        // Track (background)
         canvas.fillRoundedRect(bat_x, bat_y_pos, bat_w, bat_h, 9999, col_outline_variant);
-        // Fill (foreground, ~80%)
-        const bat_pct: i32 = 80;
-        const bat_fill_w = @divTrunc((bat_w - 4) * bat_pct, 100);
+        const bat_fill_w = @divTrunc((bat_w - 4) * 80, 100);
         canvas.fillRoundedRect(bat_x + 2, bat_y_pos + 2, bat_fill_w, bat_h - 4, 9999, col_on_secondary_container);
-        // Percentage text "80%" (13px, DemiBold for 3 chars)
         if (self.font) |*f| {
             const tbl = bat_y_pos + @divTrunc(bat_h - f.lineHeight(), 2) + f.baselineOffset();
             text_mod.renderText(&canvas, f, "80%", bat_x + 2, tbl, col_on_layer1);
         }
 
-        // ════════════════════════════════════════════════════════
-        // RIGHT SECTION: RTL coordinate accumulation
-        // RowLayout layoutDirection=RightToLeft, spacing=5
-        // ════════════════════════════════════════════════════════
-
-        // Start from right edge, accumulate leftward
+        // ═══ RIGHT: RTL sidebar + system tray ═══
         var rtl_x: i32 = bar_w - screen_rounding;
-
-        // Right sidebar button: 19px icons, 15px spacing, 10px padding each side
-        // indicatorsRowLayout, realSpacing=15
         const rsb_icon_size: i32 = 19;
         const rsb_spacing: i32 = 15;
-        const rsb_icons_count: i32 = 6;
-        const rsb_content_w = rsb_icons_count * rsb_icon_size + (rsb_icons_count - 1) * rsb_spacing;
-        const rsb_w = rsb_content_w + 20; // 10px padding each side
+        const rsb_content_w = 6 * rsb_icon_size + 5 * rsb_spacing;
+        const rsb_w = rsb_content_w + 20;
         const rsb_x = rtl_x - rsb_w;
 
-        // Draw sidebar button background on hover (transparent by default)
-        // For now, just draw the icons
         var icon_x = rsb_x + 10;
         const icon_cy = @divTrunc(bar_h, 2);
         for (0..6) |_| {
-            // Icon placeholder: filled rect (19px, colOnLayer0)
             canvas.fillRect(icon_x, icon_cy - @divTrunc(rsb_icon_size, 2), rsb_icon_size, rsb_icon_size, col_on_layer0);
             icon_x += rsb_icon_size + rsb_spacing;
         }
 
-        rtl_x = rsb_x - 5; // spacing between button and sys tray
+        rtl_x = rsb_x - 5;
 
-        // SysTray: GridLayout columnSpacing=15, items 20x20
-        // Overflow button 24x24
         const tray_item_size: i32 = 20;
         const tray_overflow_size: i32 = 24;
         const tray_col_spacing: i32 = 15;
-        // 1 overflow + 3 pinned = 4 items
         const tray_total_w = tray_overflow_size + tray_col_spacing + 3 * tray_item_size + 2 * tray_col_spacing;
         const tray_x = rtl_x - tray_total_w;
 
-        // Draw tray items
         var tix = tray_x;
-        // Overflow button (24x24)
         canvas.fillCircle(tix + @divTrunc(tray_overflow_size, 2), icon_cy, @divTrunc(tray_overflow_size, 2), col_outline);
         tix += tray_overflow_size + tray_col_spacing;
-        // Pinned items (20x20 each)
         for (0..3) |_| {
             canvas.fillCircle(tix + @divTrunc(tray_item_size, 2), icon_cy, @divTrunc(tray_item_size, 2), col_outline);
             tix += tray_item_size + tray_col_spacing;
         }
 
-        // ════════════════════════════════════════════════════════
-        // Submit buffer
-        // ════════════════════════════════════════════════════════
         self.layer.surface.attach(buf.buffer, 0, 0);
         self.layer.surface.damageBuffer(0, 0, @intCast(buf.width), @intCast(buf.height));
         self.layer.surface.commit();
@@ -411,3 +408,152 @@ pub const Bar = struct {
         self.needs_full_redraw = false;
     }
 };
+
+// ═══════════════════════════════════════════════════════════
+// Input dispatch — seat listener, pointer/keyboard, click
+// ═══════════════════════════════════════════════════════════
+
+pub fn seatListener(seat: *wl.Seat, event: wl.Seat.Event, ctx: *Context) void {
+    switch (event) {
+        .name => |name| {
+            std.log.info("seat name: {s}", .{name.name});
+        },
+        .capabilities => |caps| {
+            if (ctx.pointer) |p| {
+                p.release();
+                ctx.pointer = null;
+            }
+            if (ctx.keyboard) |kb| {
+                kb.release();
+                ctx.keyboard = null;
+            }
+
+            if (caps.capabilities.pointer) {
+                const pointer = seat.getPointer() catch @panic("failed to get pointer");
+                ctx.pointer = pointer;
+                pointer.setListener(*Context, pointerListener, ctx);
+            }
+            if (caps.capabilities.keyboard) {
+                const kb = seat.getKeyboard() catch @panic("failed to get keyboard");
+                ctx.keyboard = kb;
+                kb.setListener(*Context, keyboardListener, ctx);
+            }
+        },
+    }
+}
+
+fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context) void {
+    _ = pointer;
+    switch (event) {
+        .enter => |enter| {
+            ctx.last_enter_serial = enter.serial;
+            ctx.pointer_x = @intFromEnum(enter.surface_x);
+            ctx.pointer_y = @intFromEnum(enter.surface_y);
+            setCursorShape(ctx, enter.serial, .default);
+        },
+        .motion => |motion| {
+            ctx.pointer_x = @intFromEnum(motion.surface_x);
+            ctx.pointer_y = @intFromEnum(motion.surface_y);
+        },
+        .button => |btn| {
+            if (btn.state == .pressed) {
+                handleClick(ctx, ctx.pointer_x, ctx.pointer_y);
+            }
+        },
+        .leave => {
+            ctx.pointer_x = 0;
+            ctx.pointer_y = 0;
+        },
+        .axis, .frame, .axis_stop, .axis_value120, .axis_discrete, .axis_source => {},
+    }
+}
+
+fn keyboardListener(kb: *wl.Keyboard, event: wl.Keyboard.Event, ctx: *Context) void {
+    _ = kb;
+    _ = ctx;
+    switch (event) {
+        .key => {},
+        .enter, .leave, .keymap, .modifiers, .repeat_info => {},
+    }
+}
+
+fn handleClick(ctx: *Context, x: i32, y: i32) void {
+    const bar_h: i32 = 40;
+    const bar_w: i32 = ctx.outputs[0].mode_w;
+    const screen_rounding: i32 = 23;
+    const center_spacing: i32 = 4;
+    const center_mod_w: i32 = if (bar_w > 1200) 360 else if (bar_w > 1000) 280 else 190;
+    const ws_btn_size: i32 = 26;
+    const ws_count: i32 = 5;
+    const ws_bargroup_padding: i32 = 4;
+    const ws_w = ws_btn_size * ws_count + ws_bargroup_padding * 2;
+    const total_center = center_mod_w + center_spacing + ws_w + center_spacing + center_mod_w;
+    const center_x = @divTrunc(bar_w - total_center, 2);
+
+    const mc_x = center_x + center_mod_w + center_spacing;
+    const ws_start_x = mc_x + ws_bargroup_padding;
+    const ws_cell_y = @divTrunc(bar_h - ws_btn_size, 2);
+
+    if (y >= ws_cell_y and y < ws_cell_y + ws_btn_size) {
+        for (0..5) |i| {
+            const btn_x = ws_start_x + @as(i32, @intCast(i)) * ws_btn_size;
+            if (x >= btn_x and x < btn_x + ws_btn_size) {
+                std.log.info("workspace {d} clicked", .{i});
+                if (ctx.active_workspace) |aw| {
+                    ctx.workspaces[aw].handle.deactivate();
+                }
+                if (i < ctx.workspace_count) {
+                    ctx.workspaces[i].handle.activate();
+                    ctx.active_workspace = i;
+                }
+                ctx.roundtrip();
+                markAllDirty(ctx);
+                return;
+            }
+        }
+    }
+
+    const sidebar_x = screen_rounding;
+    const sidebar_btn_size: i32 = 30;
+    if (x >= sidebar_x and x < sidebar_x + sidebar_btn_size and y >= 0 and y < bar_h) {
+        std.log.info("sidebar button clicked", .{});
+        return;
+    }
+
+    const rsb_icon_size: i32 = 19;
+    const rsb_spacing: i32 = 15;
+    const rsb_content_w = 6 * rsb_icon_size + 5 * rsb_spacing;
+    const rsb_w = rsb_content_w + 20;
+    const rsb_x = bar_w - rsb_w - screen_rounding;
+    if (x >= rsb_x and x < bar_w - screen_rounding and y >= 0 and y < bar_h) {
+        std.log.info("right sidebar clicked at x={d}", .{x});
+        return;
+    }
+
+    if (ctx.active_toplevel) |at| {
+        const aw_x = sidebar_x + sidebar_btn_size + 10;
+        const aw_right = @divTrunc(bar_w, 2) - 80;
+        if (x >= aw_x and x < aw_right and y >= 0 and y < bar_h) {
+            std.log.info("activating toplevel: {s}", .{std.mem.sliceTo(&ctx.toplevels[at].title, 0)});
+            if (ctx.seat) |seat| {
+                ctx.toplevels[at].handle.activate(seat);
+            }
+            ctx.roundtrip();
+            return;
+        }
+    }
+}
+
+fn setCursorShape(ctx: *Context, serial: u32, shape: CursorShape) void {
+    if (ctx.cursor_shape_manager == null) return;
+    if (ctx.last_cursor_shape == shape) return;
+    ctx.last_cursor_shape = shape;
+    if (ctx.pointer) |ptr| {
+        const dev = ctx.cursor_shape_manager.?.getPointer(ptr) catch |err| {
+            std.log.warn("cursor shape: {s}", .{@errorName(err)});
+            return;
+        };
+        defer dev.destroy();
+        dev.setShape(serial, shape);
+    }
+}
