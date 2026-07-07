@@ -228,6 +228,50 @@ pub const Canvas = struct {
         }
     }
 
+    pub fn fillRoundedRectSmooth(self: *Canvas, x: i32, y: i32, w: i32, h: i32, radius: i32, color: Color) void {
+        if (radius <= 0) {
+            self.fillRect(x, y, w, h, color);
+            return;
+        }
+        if (color.a == 0) return;
+
+        const r = @min(radius, @divTrunc(@min(w, h), 2));
+        const x0 = @max(0, x - 2);
+        const y0 = @max(0, y - 2);
+        const x1 = @min(self.width, x + w + 2);
+        const y1 = @min(self.height, y + h + 2);
+        if (x0 >= x1 or y0 >= y1) return;
+
+        const xf: f32 = @floatFromInt(x);
+        const yf: f32 = @floatFromInt(y);
+        const wf: f32 = @floatFromInt(w);
+        const hf: f32 = @floatFromInt(h);
+        const rf: f32 = @floatFromInt(r);
+
+        var row: i32 = y0;
+        while (row < y1) : (row += 1) {
+            const py: f32 = @as(f32, @floatFromInt(row)) + 0.5;
+            var col: i32 = x0;
+            while (col < x1) : (col += 1) {
+                const px: f32 = @as(f32, @floatFromInt(col)) + 0.5;
+                const dist = sdfRoundedRect(px, py, xf, yf, wf, hf, rf);
+                const half_w: f32 = 1.5;
+                const t = half_w - dist;
+                const coverage: u8 = if (t <= 0) 0 else if (t >= 3.0) 255 else @intFromFloat(t / 3.0 * 255.0);
+                if (coverage == 0) continue;
+                const c = if (coverage == 255) color else Color{
+                    .r = color.r,
+                    .g = color.g,
+                    .b = color.b,
+                    .a = @intCast(@min(@as(u32, 255), @as(u32, color.a) * @as(u32, @intCast(coverage)) / 255)),
+                };
+                const offset = @as(usize, @intCast(row * self.stride + col * 4));
+                const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
+                dst.* = blendPixel(dst.*, c);
+            }
+        }
+    }
+
     pub fn fillRoundedRectCorners(self: *Canvas, x: i32, y: i32, w: i32, h: i32, r_tl: i32, r_tr: i32, r_bl: i32, r_br: i32, color: Color) void {
         if (color.a == 0) return;
         if (r_tl <= 0 and r_tr <= 0 and r_bl <= 0 and r_br <= 0) {
@@ -257,6 +301,46 @@ pub const Canvas = struct {
             while (col < x1) : (col += 1) {
                 const px: f32 = @as(f32, @floatFromInt(col)) + 0.5;
                 const dist = sdfRoundedRectCorners(px, py, xf, yf, wf, hf, r_tl_f, r_tr_f, r_bl_f, r_br_f);
+                const coverage = sdfCoverage(dist);
+                if (coverage == 0) continue;
+                const c = if (coverage == 255) color else Color{
+                    .r = color.r,
+                    .g = color.g,
+                    .b = color.b,
+                    .a = @intCast(@min(@as(u32, 255), @as(u32, color.a) * @as(u32, @intCast(coverage)) / 255)),
+                };
+                const offset = @as(usize, @intCast(row * self.stride + col * 4));
+                const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
+                dst.* = blendPixel(dst.*, c);
+            }
+        }
+    }
+
+    pub fn fillSineWave(self: *Canvas, x: i32, y: i32, w: i32, h: i32, amplitude: f32, frequency: f32, phase: f32, color: Color) void {
+        // Sine-wave tube: draws a thick sine wave as a filled shape (like end-4 WavyLine with lineWidth = h)
+        // Each column at px has center_y = y + h/2 + amplitude*sin(phase + px*frequency)
+        // Pixel is inside if |py - center_y| < h/2
+        // Extended vertically by amplitude + h/2 to let the wave oscillation be visible (like end-4's 6x-height Canvas)
+        if (color.a == 0 or w <= 0 or h <= 0) return;
+        const amp_ceil = @as(i32, @intFromFloat(@ceil(amplitude)));
+        const x0 = @max(0, x);
+        const y0 = @max(0, y - amp_ceil - 1);
+        const x1 = @min(self.width, x + w + 1);
+        const y1 = @min(self.height, y + h + amp_ceil + 2);
+        if (x0 >= x1 or y0 >= y1) return;
+
+        const half_h: f32 = @as(f32, @floatFromInt(h)) * 0.5;
+        const center_y: f32 = @as(f32, @floatFromInt(y)) + half_h;
+        const xf: f32 = @as(f32, @floatFromInt(x));
+
+        var row: i32 = y0;
+        while (row < y1) : (row += 1) {
+            const py: f32 = @as(f32, @floatFromInt(row)) + 0.5;
+            var col: i32 = x0;
+            while (col < x1) : (col += 1) {
+                const px: f32 = @as(f32, @floatFromInt(col)) + 0.5;
+                const wave_cy = center_y + amplitude * @sin(phase + (px - xf) * frequency);
+                const dist = @abs(py - wave_cy) - half_h;
                 const coverage = sdfCoverage(dist);
                 if (coverage == 0) continue;
                 const c = if (coverage == 255) color else Color{
@@ -340,6 +424,85 @@ pub const Canvas = struct {
         }
     }
 
+    pub fn blitRGB(self: *Canvas, rgb: []const u8, src_w: i32, src_h: i32, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32) void {
+        if (rgb.len < @as(usize, @intCast(@as(i64, @intCast(src_w)) * @as(i64, @intCast(src_h)) * 3))) return;
+        const x0 = @max(0, dst_x);
+        const y0 = @max(0, dst_y);
+        const x1 = @min(self.width, dst_x + dst_w);
+        const y1 = @min(self.height, dst_y + dst_h);
+        if (x0 >= x1 or y0 >= y1) return;
+
+        var row: i32 = y0;
+        while (row < y1) : (row += 1) {
+            const sy: f32 = if (src_h == dst_h)
+                @as(f32, @floatFromInt(row - dst_y))
+            else
+                @as(f32, @floatFromInt(row - dst_y)) / @as(f32, @floatFromInt(dst_h)) * @as(f32, @floatFromInt(src_h));
+            const src_row = @as(usize, @intCast(@min(@as(i32, @intFromFloat(sy)), src_h - 1))) * @as(usize, @intCast(src_w)) * 3;
+            var col: i32 = x0;
+            while (col < x1) : (col += 1) {
+                const sx: f32 = if (src_w == dst_w)
+                    @as(f32, @floatFromInt(col - dst_x))
+                else
+                    @as(f32, @floatFromInt(col - dst_x)) / @as(f32, @floatFromInt(dst_w)) * @as(f32, @floatFromInt(src_w));
+                const src_col = @as(usize, @intCast(@min(@as(i32, @intFromFloat(sx)), src_w - 1))) * 3;
+                const r = rgb[src_row + src_col];
+                const g = rgb[src_row + src_col + 1];
+                const b = rgb[src_row + src_col + 2];
+                const offset = @as(usize, @intCast(row * self.stride + col * 4));
+                const pixel: u32 = 0xFF000000 | @as(u32, r) << 16 | @as(u32, g) << 8 | @as(u32, b);
+                const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
+                dst.* = blendPixel(dst.*, Color.fromPixel(pixel));
+            }
+        }
+    }
+
+    pub fn blitRoundedClipped(self: *Canvas, rgb: []const u8, src_w: i32, src_h: i32, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, radius: i32) void {
+        if (rgb.len < @as(usize, @intCast(@as(i64, @intCast(src_w)) * @as(i64, @intCast(src_h)) * 3))) return;
+        const r = @min(radius, @divTrunc(@min(dst_w, dst_h), 2));
+        if (r <= 0) {
+            self.blitRGB(rgb, src_w, src_h, dst_x, dst_y, dst_w, dst_h);
+            return;
+        }
+        const x0 = @max(0, dst_x);
+        const y0 = @max(0, dst_y);
+        const x1 = @min(self.width, dst_x + dst_w);
+        const y1 = @min(self.height, dst_y + dst_h);
+        if (x0 >= x1 or y0 >= y1) return;
+        const xf: f32 = @floatFromInt(dst_x);
+        const yf: f32 = @floatFromInt(dst_y);
+        const wf: f32 = @floatFromInt(dst_w);
+        const hf: f32 = @floatFromInt(dst_h);
+        const rf: f32 = @floatFromInt(r);
+        var row: i32 = y0;
+        while (row < y1) : (row += 1) {
+            const sy: f32 = if (src_h == dst_h)
+                @as(f32, @floatFromInt(row - dst_y))
+            else
+                @as(f32, @floatFromInt(row - dst_y)) / @as(f32, @floatFromInt(dst_h)) * @as(f32, @floatFromInt(src_h));
+            const src_row = @as(usize, @intCast(@min(@as(i32, @intFromFloat(sy)), src_h - 1))) * @as(usize, @intCast(src_w)) * 3;
+            var col: i32 = x0;
+            while (col < x1) : (col += 1) {
+                const px: f32 = @as(f32, @floatFromInt(col)) + 0.5;
+                const py: f32 = @as(f32, @floatFromInt(row)) + 0.5;
+                const dist = sdfRoundedRect(px, py, xf, yf, wf, hf, rf);
+                const coverage = sdfCoverage(dist);
+                if (coverage == 0) continue;
+                const sx: f32 = if (src_w == dst_w)
+                    @as(f32, @floatFromInt(col - dst_x))
+                else
+                    @as(f32, @floatFromInt(col - dst_x)) / @as(f32, @floatFromInt(dst_w)) * @as(f32, @floatFromInt(src_w));
+                const src_col = @as(usize, @intCast(@min(@as(i32, @intFromFloat(sx)), src_w - 1))) * 3;
+                const r_px = rgb[src_row + src_col];
+                const g_px = rgb[src_row + src_col + 1];
+                const b_px = rgb[src_row + src_col + 2];
+                const offset = @as(usize, @intCast(row * self.stride + col * 4));
+                const pixel: u32 = @as(u32, coverage) << 24 | @as(u32, r_px) << 16 | @as(u32, g_px) << 8 | @as(u32, b_px);
+                const dst = @as(*align(1) u32, @ptrCast(&self.data[offset]));
+                dst.* = blendPixel(dst.*, Color.fromPixel(pixel));
+            }
+        }
+    }
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -372,6 +535,7 @@ pub const Font = struct {
     hb_font: *cc.hb_font_t,
     hb_buf: *cc.hb_buffer_t,
     cache: std.AutoHashMapUnmanaged(u32, Glyph),
+    fallback: ?*Font = null,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8, pixel_size: u32) !Font {
         var ft_lib: cc.FT_Library = undefined;
@@ -470,13 +634,42 @@ fn shape(font: *Font, text: []const u8, count: *c_uint) struct { [*c]cc.hb_glyph
     if (text.len > 0) {
         cc.hb_buffer_add_utf8(font.hb_buf, text.ptr, @intCast(text.len), 0, @intCast(text.len));
     }
-    cc.hb_buffer_set_direction(font.hb_buf, cc.HB_DIRECTION_LTR);
-    cc.hb_buffer_set_script(font.hb_buf, cc.HB_SCRIPT_LATIN);
-    cc.hb_buffer_set_language(font.hb_buf, cc.hb_language_from_string("en", 2));
+    cc.hb_buffer_guess_segment_properties(font.hb_buf);
     cc.hb_shape(font.hb_font, font.hb_buf, null, 0);
     const info = cc.hb_buffer_get_glyph_infos(font.hb_buf, count);
     const pos = cc.hb_buffer_get_glyph_positions(font.hb_buf, count);
     return .{ info, pos };
+}
+
+/// Returns true if any shaped glyph is .notdef (glyph index 0).
+fn hasNotdef(info: [*c]cc.hb_glyph_info_t, count: c_uint) bool {
+    var i: c_uint = 0;
+    while (i < count) : (i += 1) {
+        if (info[i].codepoint == 0) return true;
+    }
+    return false;
+}
+
+/// Shape and render text, with automatic .notdef fallback detection.
+fn renderShaped(canvas: *Canvas, use_font: *Font, use_info: [*c]cc.hb_glyph_info_t, use_pos: [*c]cc.hb_glyph_position_t, count: c_uint, x: i32, y: i32, color: Color) void {
+    var pen_x_26_6: i32 = x << 6;
+    const baseline_y: i32 = y;
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const gi = use_info[i];
+        const gp = use_pos[i];
+        const x_offset: i32 = @intCast(gp.x_offset);
+        const y_offset: i32 = @intCast(gp.y_offset);
+        const x_advance: i32 = @intCast(gp.x_advance);
+        const glyph = use_font.getGlyph(gi.codepoint) catch {
+            pen_x_26_6 += x_advance;
+            continue;
+        };
+        const dst_x = (pen_x_26_6 + x_offset + (glyph.left << 6) + 32) >> 6;
+        const dst_y = baseline_y + ((y_offset + 32) >> 6) - glyph.top;
+        canvas.blitGray(dst_x, dst_y, @intCast(glyph.width), @intCast(glyph.height), glyph.pitch, glyph.buf, color);
+        pen_x_26_6 += x_advance;
+    }
 }
 
 pub fn renderText(canvas: *Canvas, font: *Font, text: []const u8, x: i32, y: i32, color: Color) void {
@@ -486,28 +679,18 @@ pub fn renderText(canvas: *Canvas, font: *Font, text: []const u8, x: i32, y: i32
     const info, const pos = shape(font, text, &glyph_count);
     if (glyph_count == 0) return;
 
-    var pen_x_26_6: i32 = x << 6;
-    const baseline_y: i32 = y;
-
-    var i: u32 = 0;
-    while (i < glyph_count) : (i += 1) {
-        const gi = info[i];
-        const gp = pos[i];
-        const x_offset: i32 = @intCast(gp.x_offset);
-        const y_offset: i32 = @intCast(gp.y_offset);
-        const x_advance: i32 = @intCast(gp.x_advance);
-        const glyph = font.getGlyph(gi.codepoint) catch {
-            pen_x_26_6 += x_advance;
-            continue;
-        };
-
-        const dst_x = (pen_x_26_6 + x_offset + (glyph.left << 6) + 32) >> 6;
-        const dst_y = baseline_y + ((y_offset + 32) >> 6) - glyph.top;
-
-        canvas.blitGray(dst_x, dst_y, @intCast(glyph.width), @intCast(glyph.height), glyph.pitch, glyph.buf, color);
-
-        pen_x_26_6 += x_advance;
+    if (hasNotdef(info, glyph_count)) {
+        if (font.fallback) |fb| {
+            var fb_count: c_uint = 0;
+            _ = shape(fb, text, &fb_count);
+            if (fb_count > 0 and !hasNotdef(cc.hb_buffer_get_glyph_infos(fb.hb_buf, &fb_count), fb_count)) {
+                const fb_info = cc.hb_buffer_get_glyph_infos(fb.hb_buf, &fb_count);
+                const fb_pos = cc.hb_buffer_get_glyph_positions(fb.hb_buf, &fb_count);
+                return renderShaped(canvas, fb, fb_info, fb_pos, fb_count, x, y, color);
+            }
+        }
     }
+    renderShaped(canvas, font, info, pos, glyph_count, x, y, color);
 }
 
 pub fn textWidth(font: *Font, text: []const u8) i32 {
@@ -515,8 +698,22 @@ pub fn textWidth(font: *Font, text: []const u8) i32 {
 
     var glyph_count: c_uint = 0;
     const info_discard, const pos = shape(font, text, &glyph_count);
-    _ = info_discard;
     if (glyph_count == 0) return 0;
+
+    // If .notdef, re-measure with fallback
+    if (hasNotdef(info_discard, glyph_count)) {
+        if (font.fallback) |fb| {
+            var fb_count: c_uint = 0;
+            _ = shape(fb, text, &fb_count);
+            if (fb_count > 0 and !hasNotdef(cc.hb_buffer_get_glyph_infos(fb.hb_buf, &fb_count), fb_count)) {
+                const fb_pos = cc.hb_buffer_get_glyph_positions(fb.hb_buf, &fb_count);
+                var total: i32 = 0;
+                var i: u32 = 0;
+                while (i < fb_count) : (i += 1) total += @as(i32, @intCast(fb_pos[i].x_advance));
+                return (total + 32) >> 6;
+            }
+        }
+    }
 
     var total_26_6: i32 = 0;
     var i: u32 = 0;

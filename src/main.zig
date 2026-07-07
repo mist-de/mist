@@ -11,8 +11,6 @@ pub fn main() !void {
 
     std.log.info("mist-bar starting", .{});
 
-    config_mod.reload(allocator);
-
     var ctx: Context = undefined;
     try Context.init(allocator, &ctx);
     defer ctx.deinit();
@@ -49,7 +47,9 @@ pub fn main() !void {
     };
 
     const wayland_fd = ctx.getFd();
-    var mpris_tick: u32 = 0;
+    var last_mpris_query_ms: i64 = 0;
+    var last_resource_ms: i64 = 0;
+
 
     while (ctx.running) {
         const dbus_fd = mpris.getFd();
@@ -58,9 +58,12 @@ pub fn main() !void {
         fds[1] = .{ .fd = if (dbus_fd >= 0) dbus_fd else wayland_fd, .events = posix.POLL.IN, .revents = 0 };
         const nfds: u16 = if (dbus_fd >= 0) 2 else 1;
 
-        _ = posix.poll(fds[0..nfds], 100) catch |err| {
-            std.log.warn("poll: {s}", .{@errorName(err)});
-            break;
+        const timed_out = blk: {
+            const n = posix.poll(fds[0..nfds], 100) catch |err| {
+                std.log.warn("poll: {s}", .{@errorName(err)});
+                break :blk false;
+            };
+            break :blk (n == 0);
         };
 
         if (fds[0].revents & posix.POLL.IN != 0) {
@@ -76,17 +79,21 @@ pub fn main() !void {
             mpris.process();
         }
 
-        // Periodic MPRIS re-query (~1s at 100ms poll intervals)
-        mpris_tick += 1;
-        if (mpris_tick >= 10) {
-            mpris_tick = 0;
+        // Time-based MPRIS re-query (every 200ms)
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+        const now_ms = @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
+        if (now_ms - last_mpris_query_ms >= 200) {
+            last_mpris_query_ms = now_ms;
             mpris.query();
         }
 
-        // Periodic resource update (~3s at 100ms poll intervals)
-        ctx.resource_counter += 1;
-        if (ctx.resource_counter >= 30) {
-            ctx.resource_counter = 0;
+        // Check async art loading (non-blocking, each iteration)
+        mpris.tickArtLoading();
+
+        // Time-based resource update (every 3s)
+        if (now_ms - last_resource_ms >= 3000) {
+            last_resource_ms = now_ms;
             config_mod.updateResources(&ctx.resources);
             ctx.bar_dirty = true;
         }
@@ -97,17 +104,32 @@ pub fn main() !void {
             ctx.media_popup.markDirty();
             mpris.changed = false;
         }
+        // Redraw when async art load completes
+        if (mpris.art_loaded_changed) {
+            mpris.art_loaded_changed = false;
+            ctx.media_popup.markDirty();
+        }
         if (ctx.bar_dirty) {
             bar_mod.markAllDirty(&ctx);
             ctx.bar_dirty = false;
         }
         bar_mod.drawOutputs(&ctx, &mpris);
 
-        // Draw media controls popup if visible (only commits when needs_redraw)
-        if (ctx.media_popup.visible) {
-            const was_dirty = ctx.media_popup.needs_redraw;
+        // Advance position ONLY on poll timeout (matches real-time)
+        if (timed_out) {
+            if (mpris.has_player and mpris.status == .playing) {
+                mpris.position += 100000; // 100ms in μs
+                if (mpris.length > 0 and mpris.position > mpris.length) {
+                    mpris.position = mpris.length;
+                }
+                ctx.media_popup.markProgressDirty();
+            }
+        }
+
+        // Draw media controls popup (only when something actually changed)
+        if (ctx.media_popup.visible and ctx.media_popup.needs_redraw) {
             ctx.media_popup.draw(&ctx);
-            if (was_dirty) ctx.media_popup.commit(&ctx);
+            ctx.media_popup.commit(&ctx);
         }
     }
 

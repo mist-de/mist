@@ -1,5 +1,6 @@
 const std = @import("std");
 const bc = @import("basu_c.zig").c;
+const cc = @import("c.zig").c;
 
 pub const PlaybackStatus = enum(u2) {
     stopped = 0,
@@ -13,6 +14,7 @@ pub const MprisPlayer = struct {
     name: [:0]const u8 = "",
     title: [:0]const u8 = "",
     artist: [:0]const u8 = "",
+    url: [:0]const u8 = "",
     art_url: [:0]const u8 = "",
     status: PlaybackStatus = .stopped,
     position: i64 = 0,
@@ -20,9 +22,18 @@ pub const MprisPlayer = struct {
     has_player: bool = false,
     changed: bool = false,
 
+    // Album art
+    art_rgb: [110 * 110 * 3]u8 = undefined,
+    art_has: bool = false,
+    art_load_needed: bool = false,
+    art_loaded_changed: bool = false,
+    current_art_url_buf: [1024]u8 = undefined,
+    current_art_url: [:0]const u8 = "",
+
     title_buf: [256]u8 = undefined,
     artist_buf: [256]u8 = undefined,
     art_url_buf: [1024]u8 = undefined,
+    url_buf: [1024]u8 = undefined,
 
     pub fn init() !MprisPlayer {
         var b: ?*bc.sd_bus = null;
@@ -64,6 +75,19 @@ pub const MprisPlayer = struct {
         self.name = pname;
         self.has_player = true;
         self.readProperties(b);
+        // Fallback: if player doesn't provide mpris:artUrl, try YouTube thumbnail
+        if (self.art_url.len == 0) {
+            self.tryYouTubeThumbnail();
+        }
+        // Always check if art URL changed (not gated on 'changed') for retry on failure
+        if (self.art_url.len > 0) {
+            if (!std.mem.eql(u8, self.current_art_url, self.art_url)) {
+                self.art_has = false;
+                self.art_load_needed = true;
+            }
+        } else {
+            self.art_has = false;
+        }
     }
 
     fn findPlayer(self: *MprisPlayer, bus: *bc.sd_bus) ?[:0]const u8 {
@@ -165,6 +189,8 @@ pub const MprisPlayer = struct {
         var rrc = bc.sd_bus_message_enter_container(m, 'a', "{sv}");
         if (rrc <= 0) return;
 
+        self.url = "";
+        self.art_url = "";
         var has_title = false;
         var has_artist = false;
         var has_length = false;
@@ -269,6 +295,17 @@ pub const MprisPlayer = struct {
                     break :blk true;
                 }
                 break :blk false;
+            } else if (std.mem.eql(u8, ks, "xesam:url") and vt == 's') blk: {
+                var val: [*:0]const u8 = undefined;
+                if (bc.sd_bus_message_read(m, "s", &val) > 0) {
+                    const vs = std.mem.span(val);
+                    const len = @min(vs.len, self.url_buf.len - 1);
+                    @memcpy(self.url_buf[0..len], vs[0..len]);
+                    self.url_buf[len] = 0;
+                    self.url = self.url_buf[0..len :0];
+                    break :blk true;
+                }
+                break :blk false;
             } else false;
 
             if (!handled) {
@@ -281,6 +318,135 @@ pub const MprisPlayer = struct {
         _ = bc.sd_bus_message_exit_container(m); // array
 
         if (has_title or has_artist or has_length or has_art_url) self.changed = true;
+    }
+
+    fn hashUrl(url: []const u8) u64 {
+        var h: u64 = 0x12345678;
+        for (url) |c| h = h *% 31 +% @as(u64, c);
+        return h;
+    }
+
+    /// If player doesn't provide mpris:artUrl, extract YouTube video ID from xesam:url
+    /// and construct img.youtube.com thumbnail URL.
+    fn tryYouTubeThumbnail(self: *MprisPlayer) void {
+        if (self.url.len < 11) return;
+
+        const url = self.url;
+
+        // Pattern: youtube.com/watch?v=VIDEO_ID
+        if (std.mem.indexOf(u8, url, "youtube.com/watch")) |_| {
+            if (std.mem.indexOf(u8, url, "v=")) |vpos| {
+                const start = vpos + 2;
+                var end = start;
+                while (end < url.len and url[end] != '&') end += 1;
+                const vid = url[start..end];
+                if (vid.len >= 11) {
+                    self.setYouTubeArtUrl(vid[0..11]);
+                    return;
+                }
+            }
+        }
+
+        // Pattern: youtu.be/VIDEO_ID
+        if (std.mem.indexOf(u8, url, "youtu.be/")) |pos| {
+            const start = pos + 9;
+            var end = start;
+            while (end < url.len and url[end] != '?' and url[end] != '&') end += 1;
+            const vid = url[start..end];
+            if (vid.len >= 11) {
+                self.setYouTubeArtUrl(vid[0..11]);
+            }
+        }
+    }
+
+    fn setYouTubeArtUrl(self: *MprisPlayer, vid: []const u8) void {
+        const buf = &self.art_url_buf;
+        const thumbnail_url = std.fmt.bufPrint(buf, "https://img.youtube.com/vi/{s}/hqdefault.jpg", .{vid}) catch return;
+        buf[thumbnail_url.len] = 0;
+        self.art_url = buf[0..thumbnail_url.len :0];
+    }
+
+    /// Load album art: convert URL to 110x110 RGB via ImageMagick.
+    /// Only saves URL on success — failures are retried on next query().
+    fn loadAlbumArt(self: *MprisPlayer) void {
+        if (self.art_url.len == 0) return;
+
+        _ = cc.mkdir("/tmp/mist_coverart", 0o755);
+
+        const url_hash = hashUrl(self.art_url);
+        var hash_buf: [32]u8 = undefined;
+        const hash_str = std.fmt.bufPrint(&hash_buf, "{x}", .{url_hash}) catch return;
+        var cache_path_buf: [256]u8 = undefined;
+        const cache_path = std.fmt.bufPrint(&cache_path_buf, "/tmp/mist_coverart/{s}.raw", .{hash_str}) catch return;
+        cache_path_buf[cache_path.len] = 0;
+
+        // Check cache first
+        {
+            const cache_z: [*:0]const u8 = @ptrCast(&cache_path_buf);
+            const f = cc.fopen(cache_z, "rb");
+            if (f) |fh| {
+                defer _ = cc.fclose(fh);
+                const n = cc.fread(&self.art_rgb, 1, self.art_rgb.len, fh);
+                if (n == self.art_rgb.len) {
+                    self.art_has = true;
+                    self.saveArtUrl();
+                    self.art_loaded_changed = true;
+                }
+                return;
+            }
+        }
+
+        // Build source path: strip file:// prefix
+        var src_buf: [2000]u8 = undefined;
+        const src_path: [:0]const u8 = if (std.mem.startsWith(u8, self.art_url, "file://")) blk: {
+            const stripped = self.art_url[7..];
+            const len = @min(stripped.len, src_buf.len - 1);
+            @memcpy(src_buf[0..len], stripped[0..len]);
+            src_buf[len] = 0;
+            break :blk src_buf[0..len :0];
+        } else self.art_url;
+
+        // Run convert
+        var cmd_buf: [3000]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "convert '{s}' -resize 110x110! -depth 8 'rgb:{s}' 2>/dev/null",
+            .{ src_path, cache_path }) catch return;
+        cmd_buf[cmd.len] = 0;
+        const rc = cc.system(@ptrCast(&cmd_buf));
+        if (rc != 0) {
+            std.log.warn("convert failed (exit {}) for art_url: {s}", .{ rc, self.art_url });
+            return;
+        }
+
+        // Read result
+        const cache_z: [*:0]const u8 = @ptrCast(&cache_path_buf);
+        const f = cc.fopen(cache_z, "rb") orelse {
+            std.log.warn("convert succeeded but output file not found: {s}", .{cache_path});
+            return;
+        };
+        defer _ = cc.fclose(f);
+        const n = cc.fread(&self.art_rgb, 1, self.art_rgb.len, f);
+        if (n == self.art_rgb.len) {
+            self.art_has = true;
+            self.saveArtUrl();
+            self.art_loaded_changed = true;
+        } else {
+            std.log.warn("convert output short read: got {} expected {}", .{ n, self.art_rgb.len });
+        }
+    }
+
+    /// Called every main loop iteration to kick off pending art loading.
+    pub fn tickArtLoading(self: *MprisPlayer) void {
+        if (self.art_load_needed) {
+            self.art_load_needed = false;
+            self.loadAlbumArt();
+        }
+    }
+
+    fn saveArtUrl(self: *MprisPlayer) void {
+        const len = @min(self.art_url.len, self.current_art_url_buf.len - 1);
+        @memcpy(self.current_art_url_buf[0..len], self.art_url[0..len]);
+        self.current_art_url_buf[len] = 0;
+        self.current_art_url = self.current_art_url_buf[0..len :0];
     }
 
     pub fn playPause(self: *MprisPlayer) void {

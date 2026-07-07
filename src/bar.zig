@@ -6,7 +6,7 @@ const zwlr = wayland.client.zwlr;
 const Context = @import("wl.zig").Context;
 const LayerSurface = @import("wl.zig").LayerSurface;
 const ShmBuffer = @import("wl.zig").ShmBuffer;
-const CursorShape = @import("wl.zig").CursorShape;
+const setCursorShape = @import("wl.zig").setCursorShape;
 const Canvas = @import("render.zig").Canvas;
 const render_mod = @import("render.zig");
 const Font = render_mod.Font;
@@ -14,9 +14,8 @@ const config_mod = @import("config.zig");
 const Color = config_mod.Color;
 const mpris_mod = @import("mpris.zig");
 const media_popup_mod = @import("media_popup.zig");
-const MediaPopup = media_popup_mod.MediaPopup;
-const Appearance = config_mod.Appearance;
 const Rect = config_mod.Rect;
+const Appearance = config_mod.Appearance;
 
 // ═══════════════════════════════════════════════════════════
 // OutputState — per-output bar lifecycle
@@ -25,33 +24,42 @@ const Rect = config_mod.Rect;
 pub const OutputState = struct {
     bar: ?Bar = null,
     output_idx: usize,
-    name: [64]u8 = .{0} ** 64,
-    configured: bool = false,
 };
 
 var outputs: [8]OutputState = undefined;
 var output_count: usize = 0;
 
 pub fn initOutput(ctx: *Context, output_idx: usize) !void {
-    const name = std.mem.sliceTo(&ctx.outputs[output_idx].name, 0);
     if (output_count < 8) {
         outputs[output_count] = .{ .output_idx = output_idx };
-        const name_len = @min(name.len, outputs[output_count].name.len - 1);
-        @memcpy(outputs[output_count].name[0..name_len], name[0..name_len]);
         output_count += 1;
     }
     try ensureBar(ctx, output_idx);
 }
 
 fn ensureBar(ctx: *Context, output_idx: usize) !void {
-    const name = std.mem.sliceTo(&ctx.outputs[output_idx].name, 0);
     for (0..output_count) |i| {
         const out = &outputs[i];
         if (out.output_idx != output_idx) continue;
         if (out.bar != null) return;
 
-        out.bar = try Bar.init(ctx.allocator, ctx, output_idx, name);
+        out.bar = try Bar.init(ctx.allocator, ctx, output_idx);
         if (out.bar) |*bar| {
+            // Link fallback font (must happen AFTER bar is in its final location to avoid dangling ptr)
+            if (bar.font) |*f| {
+                if (config_mod.resolveFallbackFont(ctx.allocator)) |fb_path| {
+                    defer ctx.allocator.free(fb_path);
+                    if (Font.init(ctx.allocator, fb_path, config_mod.get().font_size)) |fb| {
+                        bar.font_fallback = fb;
+                        f.fallback = &bar.font_fallback.?;
+                    } else |_| {}
+                }
+            }
+            if (bar.font_small) |*f| {
+                if (bar.font_fallback) |*fb| {
+                    f.fallback = fb;
+                }
+            }
             if (bar.layer.layer_surface) |ls| {
                 ls.setListener(*Bar, Bar.layerSurfaceListener, bar);
             }
@@ -108,7 +116,6 @@ pub const Bar = struct {
         }
     }
 
-    output_name: [64]u8,
     layer: LayerSurface = undefined,
     buffer: ?ShmBuffer = null,
     rect: Rect = .zero,
@@ -116,9 +123,10 @@ pub const Bar = struct {
     font_small: ?Font = null,
     font_icon: ?Font = null,
     font_material: ?Font = null,
+    font_fallback: ?Font = null,
     needs_full_redraw: bool = true,
 
-    pub fn init(allocator: std.mem.Allocator, ctx: *Context, output_idx: usize, name: []const u8) !Bar {
+    pub fn init(allocator: std.mem.Allocator, ctx: *Context, output_idx: usize) !Bar {
         const output = &ctx.outputs[output_idx];
         const cfg = config_mod.get();
         const anchor: zwlr.LayerSurfaceV1.Anchor = if (cfg.bottom)
@@ -126,10 +134,7 @@ pub const Bar = struct {
         else
             .{ .top = true, .left = true, .right = true };
 
-        var bar = Bar{ .output_name = .{0} ** 64 };
-        const name_len = @min(name.len, bar.output_name.len - 1);
-        @memcpy(bar.output_name[0..name_len], name[0..name_len]);
-
+        var bar = Bar{};
         bar.layer = try LayerSurface.create(ctx, output, anchor, cfg.height);
         bar.rect = .{ .x = 0, .y = 0, .width = 0, .height = cfg.height };
 
@@ -165,6 +170,7 @@ pub const Bar = struct {
         if (self.font_small) |*f| f.deinit();
         if (self.font_icon) |*f| f.deinit();
         if (self.font_material) |*f| f.deinit();
+        if (self.font_fallback) |*f| f.deinit();
         self.layer.destroy();
     }
 
@@ -237,7 +243,7 @@ pub const Bar = struct {
         const wsDisplayCount = @min(wsCount, ctx.workspace_count);
         for (0..wsDisplayCount) |wi| {
             const wsInfo = &ctx.workspaces[wi];
-            occupiedBuf[wi] = wsInfo.name_len > 0;
+            occupiedBuf[wi] = wsInfo.name[0] != 0;
             if (wsInfo.active) activeWs = wi;
         }
         if (wsDisplayCount == 0) {
@@ -326,7 +332,15 @@ pub const Bar = struct {
             const ringCX: i32 = resX + ringR;
             canvas.fillCircle(ringCX, centerY, @as(f32, @floatFromInt(ringR)), Color.rgba(0xec, 0xe6, 0xe9, 0x80));
             if (rd.pct > 0) {
-                canvas.fillArc(ringCX, centerY, 0, ringR, half_pi, -two_pi * rd.pct, colOnSecondaryContainer);
+                const inner_r: i32 = ringR - 2;
+                canvas.fillArc(ringCX, centerY, inner_r, ringR, half_pi, -two_pi * rd.pct, colOnSecondaryContainer);
+                const cap_r: f32 = 1.0;
+                const end_angle = half_pi - two_pi * rd.pct;
+                const mid_r = @as(f32, @floatFromInt((ringR + inner_r) / 2));
+                const cxf2 = @as(f32, @floatFromInt(ringCX)) + 0.5;
+                const cyf2 = @as(f32, @floatFromInt(centerY)) + 0.5;
+                canvas.fillCircle(@intFromFloat(cxf2 + @cos(half_pi) * mid_r), @intFromFloat(cyf2 + @sin(half_pi) * mid_r), cap_r, colOnSecondaryContainer);
+                canvas.fillCircle(@intFromFloat(cxf2 + @cos(end_angle) * mid_r), @intFromFloat(cyf2 + @sin(end_angle) * mid_r), cap_r, colOnSecondaryContainer);
             }
 
             if (self.font_material) |*fMat| {
@@ -353,11 +367,21 @@ pub const Bar = struct {
             ctx.media_area_x1 = lcX + centerSideModuleWidth;
             resX += 8;
             const mediaRingCX: i32 = resX + 10;
-            ctx.media_icon_x0 = mediaRingCX - 10;
-            ctx.media_icon_x1 = mediaRingCX + 10;
             const mediaProgress: f32 = if (mpris.has_player and mpris.length > 0) @as(f32, @floatFromInt(mpris.position)) / @as(f32, @floatFromInt(mpris.length)) else 0;
             canvas.fillCircle(mediaRingCX, centerY, 10.0, Color.rgba(0xec, 0xe6, 0xe9, 0x80));
-            canvas.fillArc(mediaRingCX, centerY, 0, 10, half_pi, -two_pi * mediaProgress, colOnSecondaryContainer);
+            if (mediaProgress > 0) {
+                const outer_r: i32 = 10;
+                const inner_r: i32 = 8;
+                canvas.fillArc(mediaRingCX, centerY, inner_r, outer_r, half_pi, -two_pi * mediaProgress, colOnSecondaryContainer);
+                // Round caps at arc ends (end-4 ShapePath.RoundCap equivalent)
+                const cap_r: f32 = 1.0;
+                const end_angle = half_pi - two_pi * mediaProgress;
+                const mid_r = @as(f32, @floatFromInt((outer_r + inner_r) / 2));
+                const cxf = @as(f32, @floatFromInt(mediaRingCX)) + 0.5;
+                const cyf = @as(f32, @floatFromInt(centerY)) + 0.5;
+                canvas.fillCircle(@intFromFloat(cxf + @cos(half_pi) * mid_r), @intFromFloat(cyf + @sin(half_pi) * mid_r), cap_r, colOnSecondaryContainer);
+                canvas.fillCircle(@intFromFloat(cxf + @cos(end_angle) * mid_r), @intFromFloat(cyf + @sin(end_angle) * mid_r), cap_r, colOnSecondaryContainer);
+            }
 
             if (self.font_material) |*fMat| {
                 const tbl = @divTrunc(bar_h - fMat.lineHeight(), 2) + fMat.baselineOffset();
@@ -569,15 +593,7 @@ pub const Bar = struct {
         if (batFillW > 0) {
             canvas.fillRoundedRectAA(batX, batY, batFillW, batH, fullRounding, colOnSecondaryContainer);
         }
-        const charging = false;
-        if (charging) {
-            if (self.font_material) |*fMat| {
-                const tbl = batY + @divTrunc(batH - fMat.lineHeight(), 2) + fMat.baselineOffset();
-                const icon = "bolt";
-                const iw = render_mod.textWidth(fMat, icon);
-                render_mod.renderText(&canvas, fMat, icon, batX + @divTrunc(batW - iw, 2), tbl, colOnLayer1);
-            }
-        } else {
+        {
             if (self.font) |*f| {
                 const tbl = batY + @divTrunc(batH - f.lineHeight(), 2) + f.baselineOffset();
                 const batStr = "80";
@@ -635,6 +651,7 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
         .enter => |enter| {
             ctx.last_enter_serial = enter.serial;
             ctx.last_enter_surface = enter.surface;
+            ctx.pointer_surface = enter.surface;
             ctx.pointer_x = enter.surface_x.toInt();
             ctx.pointer_y = enter.surface_y.toInt();
             setCursorShape(ctx, enter.serial, .default);
@@ -642,6 +659,10 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
         .motion => |motion| {
             ctx.pointer_x = motion.surface_x.toInt();
             ctx.pointer_y = motion.surface_y.toInt();
+            // Set cursor when pointer is over popup area (compositor may not send enter for popup)
+            if (ctx.popup_surface != null and ctx.media_popup.visible) {
+                setCursorShape(ctx, ctx.last_enter_serial, .default);
+            }
         },
         .button => |btn| {
             if (btn.state == .pressed) {
@@ -650,14 +671,40 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
                     if (ctx.mpris) |mpris| {
                         ctx.media_popup.handleClick(ctx.pointer_x, ctx.pointer_y, btn.button, mpris);
                     }
-                } else {
-                    handleClick(ctx, ctx.pointer_x, ctx.pointer_y, btn.button);
+                    return;
                 }
+                // Position-based fallback: compositor might not send enter for popup surface.
+                // But if click is on the bar's media widget area, route to bar handler (to toggle popup off).
+                if (ctx.popup_surface != null and ctx.media_popup.visible) {
+                    const bar_h: i32 = 40;
+                    const on_media = ctx.pointer_x >= ctx.media_area_x0 and ctx.pointer_x < ctx.media_area_x1 and ctx.pointer_y >= 0 and ctx.pointer_y < bar_h;
+                    if (on_media) {
+                        handleClick(ctx, ctx.pointer_x, ctx.pointer_y, btn.button);
+                        return;
+                    }
+                    const mp = @import("media_popup.zig");
+                    const bx = ctx.pointer_x - ctx.media_popup.popup_left;
+                    const by = ctx.pointer_y - mp.POPUP_MARGIN_TOP;
+                    if (bx >= 0 and bx < mp.POPUP_W and by >= 0 and by < mp.POPUP_H) {
+                        if (ctx.mpris) |mpris| {
+                            ctx.media_popup.handleClick(bx, by, btn.button, mpris);
+                        }
+                        return;
+                    }
+                    if (ctx.pointer_x >= 0 and ctx.pointer_x < mp.POPUP_W and
+                        ctx.pointer_y >= 0 and ctx.pointer_y < mp.POPUP_H)
+                    {
+                        if (ctx.mpris) |mpris| {
+                            ctx.media_popup.handleClick(ctx.pointer_x, ctx.pointer_y, btn.button, mpris);
+                        }
+                        return;
+                    }
+                }
+                handleClick(ctx, ctx.pointer_x, ctx.pointer_y, btn.button);
             }
         },
         .leave => {
-            ctx.pointer_x = 0;
-            ctx.pointer_y = 0;
+            ctx.pointer_surface = null; // invalidate surface tracking, keep coordinates
         },
         .axis, .frame, .axis_stop, .axis_value120, .axis_discrete, .axis_source => {},
     }
@@ -777,16 +824,4 @@ fn truncateText(font: *Font, text: []const u8, maxW: i32, out: []u8) []const u8 
     return out[0 .. lo + 3];
 }
 
-fn setCursorShape(ctx: *Context, serial: u32, shape: CursorShape) void {
-    if (ctx.cursor_shape_manager == null) return;
-    if (ctx.last_cursor_shape == shape) return;
-    ctx.last_cursor_shape = shape;
-    if (ctx.pointer) |ptr| {
-        const dev = ctx.cursor_shape_manager.?.getPointer(ptr) catch |err| {
-            std.log.warn("cursor shape: {s}", .{@errorName(err)});
-            return;
-        };
-        defer dev.destroy();
-        dev.setShape(serial, shape);
-    }
-}
+

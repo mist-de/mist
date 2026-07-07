@@ -4,12 +4,6 @@ const std = @import("std");
 // Geometry types
 // ═══════════════════════════════════════════════════════════
 
-pub const Point = struct {
-    x: i32,
-    y: i32,
-    pub const zero: Point = .{ .x = 0, .y = 0 };
-};
-
 pub const Size = u32;
 
 pub const Rect = struct {
@@ -129,36 +123,6 @@ pub const Appearance = struct {
 };
 
 // ═══════════════════════════════════════════════════════════
-// Utility
-// ═══════════════════════════════════════════════════════════
-
-pub fn BoundedArray(comptime T: type, comptime max_size: usize) type {
-    return struct {
-        const Self = @This();
-        data: [max_size]T = undefined,
-        len: usize = 0,
-
-        pub fn append(self: *Self, item: T) !void {
-            if (self.len >= max_size) return error.OutOfMemory;
-            self.data[self.len] = item;
-            self.len += 1;
-        }
-
-        pub fn slice(self: *Self) []T {
-            return self.data[0..self.len];
-        }
-
-        pub fn constSlice(self: *const Self) []const T {
-            return self.data[0..self.len];
-        }
-
-        pub fn reset(self: *Self) void {
-            self.len = 0;
-        }
-    };
-}
-
-// ═══════════════════════════════════════════════════════════
 // Configuration
 // ═══════════════════════════════════════════════════════════
 
@@ -166,12 +130,11 @@ pub const Config = struct {
     height: u32 = 40,
     bottom: bool = false,
     font_regular: []const u8 = "Inter_18pt-Regular.ttf",
-    font_bold: []const u8 = "Inter_18pt-Bold.ttf",
     font_icon: []const u8 = "NotoSansNerdFont-Regular.ttf",
     font_material: []const u8 = "MaterialSymbolsRounded.ttf",
+    font_fallback: []const u8 = "NotoSansBengali-Regular.ttf",
     font_size_small: u32 = 12,
     font_size: u32 = 15,
-    font_size_large: u32 = 17,
     font_size_material: u32 = 19,
     font_size_sidebar: u32 = 22,
 };
@@ -191,6 +154,49 @@ fn fileExists(path: []const u8) bool {
     return std.c.access(path_z, std.c.F_OK) == 0;
 }
 
+fn findSystemFont(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
+    const dirs = [_][]const u8{
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+    };
+    for (dirs) |dir| {
+        const path = std.fs.path.join(allocator, &.{ dir, name }) catch continue;
+        if (fileExists(path)) return path;
+        allocator.free(path);
+    }
+    if (std.c.getenv("HOME")) |home_ptr| {
+        const home = std.mem.span(home_ptr);
+        if (std.fs.path.join(allocator, &.{ home, ".local", "share", "fonts", name })) |p| {
+            if (fileExists(p)) return p;
+            allocator.free(p);
+        } else |_| {}
+        if (std.fs.path.join(allocator, &.{ home, ".fonts", name })) |p| {
+            if (fileExists(p)) return p;
+            allocator.free(p);
+        } else |_| {}
+    }
+    return null;
+}
+
+const cc_cfg = @import("c.zig").c;
+
+fn findFontByFamily(allocator: std.mem.Allocator, family: []const u8) ?[]u8 {
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "fc-match '{s}' --format='%{{file}}' 2>/dev/null", .{family}) catch return null;
+    cmd_buf[cmd.len] = 0;
+    const cmd_z: [*:0]const u8 = @ptrCast(&cmd_buf);
+    const f = cc_cfg.popen(cmd_z, "r") orelse return null;
+    defer _ = cc_cfg.pclose(f);
+    var line: [4096]u8 = undefined;
+    if (cc_cfg.fgets(&line, @intCast(line.len), f)) |result| {
+        const path = std.mem.trim(u8, std.mem.span(result), " \n\r\t");
+        if (path.len > 0 and fileExists(path)) {
+            return allocator.dupe(u8, path) catch null;
+        }
+    }
+    return null;
+}
+
 pub fn resolveFontPath(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     const cwd_path = try std.fs.path.join(allocator, &.{ "fonts", name });
     if (fileExists(cwd_path)) return cwd_path;
@@ -200,18 +206,24 @@ pub fn resolveFontPath(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     if (fileExists(zig_out)) return zig_out;
     allocator.free(zig_out);
 
-    if (std.c.getenv("HOME")) |home_ptr| {
-        const home = std.mem.span(home_ptr);
-        const home_path = try std.fs.path.join(allocator, &.{ home, ".fonts", name });
-        if (fileExists(home_path)) return home_path;
-        allocator.free(home_path);
-    }
+    if (findSystemFont(allocator, name)) |p| return p;
 
-    return std.fs.path.join(allocator, &.{ "fonts", name });
+    return error.FontNotFound;
 }
 
-pub fn reload(allocator: std.mem.Allocator) void {
-    _ = allocator;
+pub fn resolveFallbackFont(allocator: std.mem.Allocator) ?[]u8 {
+    const cfg = get();
+    // Try exact config filename first
+    if (resolveFontPath(allocator, cfg.font_fallback)) |p| return p else |_| {}
+    // Try alternative common names
+    for (&[_][]const u8{ "NotoSansBengali.ttf", "NotoSansBengali-Regular.ttf", "Mukti-Book.ttf" }) |alt| {
+        if (resolveFontPath(allocator, alt)) |p| return p else |_| {}
+    }
+    // Use fontconfig to find any Bengali font by family name
+    for (&[_][]const u8{ "Noto Sans Bengali", "Noto Sans Bengali Regular", "Mukti" }) |fam| {
+        if (findFontByFamily(allocator, fam)) |p| return p;
+    }
+    return null;
 }
 
 /// Returns Nerd Font codepoint for the detected distro from /etc/os-release

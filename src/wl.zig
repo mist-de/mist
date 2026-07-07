@@ -5,8 +5,6 @@ const zwlr = wayland.client.zwlr;
 const wp = wayland.client.wp;
 const ext = wayland.client.ext;
 
-const Rect = @import("config.zig").Rect;
-const Color = @import("config.zig").Color;
 const ResourceState = @import("config.zig").ResourceState;
 const mpris_mod = @import("mpris.zig");
 const MediaPopup = @import("media_popup.zig").MediaPopup;
@@ -25,29 +23,13 @@ pub const OutputIndex = enum(u8) {
     _5,
     _6,
     _7,
-
-    pub fn fromInt(idx: usize) OutputIndex {
-        return @enumFromInt(@as(u8, @intCast(idx)));
-    }
-
-    pub fn toInt(self: OutputIndex) usize {
-        return @intFromEnum(self);
-    }
 };
 
 pub const OutputInfo = struct {
     output: *wl.Output,
-    id: u32,
-    scale: u31 = 1,
-    physical_w: i32 = 0,
-    physical_h: i32 = 0,
     mode_w: i32 = 0,
     mode_h: i32 = 0,
     name: [64]u8 = .{0} ** 64,
-    has_mode: bool = false,
-    has_name: bool = false,
-    has_geo: bool = false,
-    changed: bool = true,
 };
 
 pub const max_toplevels = 32;
@@ -56,19 +38,12 @@ pub const ToplevelInfo = struct {
     handle: *zwlr.ForeignToplevelHandleV1,
     title: [256]u8 = .{0} ** 256,
     app_id: [256]u8 = .{0} ** 256,
-    title_len: usize = 0,
-    app_id_len: usize = 0,
-    is_active: bool = false,
-    is_closed: bool = false,
 };
 
 pub const WorkspaceInfo = struct {
     handle: *ext.WorkspaceHandleV1,
     name: [128]u8 = .{0} ** 128,
-    name_len: usize = 0,
     active: bool = false,
-    ws_id: [128]u8 = .{0} ** 128,
-    ws_id_len: usize = 0,
 };
 
 pub const Context = struct {
@@ -88,10 +63,11 @@ pub const Context = struct {
     output_count: usize = 0,
     running: bool = true,
 
-    last_motion_output: OutputIndex = .none,
     last_enter_serial: u32 = 0,
     last_enter_surface: ?*wl.Surface = null,
-    last_cursor_shape: ?CursorShape = null,
+    /// Tracks the actual surface the pointer was last over (via enter event).
+    /// Not overridden by show() — used to detect stale coordinates.
+    pointer_surface: ?*wl.Surface = null,
     pointer_x: i32 = 0,
     pointer_y: i32 = 0,
     /// Set to the popup's wl_surface when media controls popup is visible
@@ -108,7 +84,7 @@ pub const Context = struct {
     /// Set to true when workspace/toplevel state changes — triggers bar redraw
     bar_dirty: bool = false,
     resources: ResourceState = .{},
-    resource_counter: u32 = 0,
+
 
     /// Media controls popup (toggled by left-click on media widget)
     media_popup: MediaPopup = .{},
@@ -118,8 +94,6 @@ pub const Context = struct {
     /// Clickable area of the media widget (set during draw, consumed by handleClick)
     media_area_x0: i32 = 0,
     media_area_x1: i32 = 0,
-    media_icon_x0: i32 = 0,
-    media_icon_x1: i32 = 0,
 
     allocator: std.mem.Allocator,
 
@@ -167,21 +141,6 @@ pub const Context = struct {
     pub fn getFd(self: *Context) i32 {
         return self.display.getFd();
     }
-
-    pub fn findOutputByName(self: *Context, name: []const u8) ?*OutputInfo {
-        for (0..self.output_count) |i| {
-            const out = &self.outputs[i];
-            const out_name = std.mem.sliceTo(&out.name, 0);
-            if (std.mem.eql(u8, out_name, name)) return out;
-        }
-        return null;
-    }
-
-    pub fn findOutputBySurface(self: *Context, surface: *wl.Surface) ?*OutputInfo {
-        _ = surface;
-        _ = self;
-        return null;
-    }
 };
 
 fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Context) void {
@@ -212,7 +171,7 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Cont
                     const output = registry.bind(global.name, wl.Output, global.version) catch null;
                     if (output) |o| {
                         const info = &ctx.outputs[ctx.output_count];
-                        info.* = .{ .output = o, .id = global.name };
+                        info.* = .{ .output = o };
                         o.setListener(*Context, outputListener, ctx);
                         ctx.output_count += 1;
                         std.log.info("  -> output #{d} bound: info={*} output={any}", .{ ctx.output_count - 1, info, o });
@@ -245,31 +204,21 @@ fn outputListener(output: *wl.Output, event: wl.Output.Event, ctx: *Context) voi
 
     switch (event) {
         .geometry => |geo| {
-            info.physical_w = geo.physical_width;
-            info.physical_h = geo.physical_height;
-            info.has_geo = true;
-            info.changed = true;
             std.log.info("output geometry: {d}x{d} (info ptr={*})", .{ geo.physical_width, geo.physical_height, info });
         },
         .mode => |mode| {
             info.mode_w = mode.width;
             info.mode_h = mode.height;
-            info.has_mode = true;
-            info.changed = true;
             std.log.info("output mode: {d}x{d} -> info.mode_w={d}", .{ mode.width, mode.height, info.mode_w });
         },
         .name => |name_ev| {
-            info.has_name = true;
             const name_src = std.mem.sliceTo(name_ev.name, 0);
             const name_len = @min(name_src.len, info.name.len - 1);
             @memcpy(info.name[0..name_len], name_src[0..name_len]);
             info.name[name_len] = 0;
-            info.changed = true;
             std.log.info("output name: '{s}' info.name='{s}'", .{ name_src, std.mem.sliceTo(&info.name, 0) });
         },
         .scale => |scale_ev| {
-            info.scale = @intCast(@max(1, scale_ev.factor));
-            info.changed = true;
             std.log.info("output scale: {d}", .{scale_ev.factor});
         },
         .description, .done => {},
@@ -308,7 +257,6 @@ fn toplevelHandleListener(handle: *zwlr.ForeignToplevelHandleV1, event: zwlr.For
             const len = @min(src.len, info.title.len - 1);
             @memcpy(info.title[0..len], src[0..len]);
             info.title[len] = 0;
-            info.title_len = len;
             ctx.bar_dirty = true;
             std.log.info("toplevel title: '{s}'", .{src});
         },
@@ -317,7 +265,6 @@ fn toplevelHandleListener(handle: *zwlr.ForeignToplevelHandleV1, event: zwlr.For
             const len = @min(src.len, info.app_id.len - 1);
             @memcpy(info.app_id[0..len], src[0..len]);
             info.app_id[len] = 0;
-            info.app_id_len = len;
             ctx.bar_dirty = true;
             std.log.info("toplevel app_id: '{s}'", .{src});
         },
@@ -332,7 +279,6 @@ fn toplevelHandleListener(handle: *zwlr.ForeignToplevelHandleV1, event: zwlr.For
                 const state_val = std.mem.readInt(u32, state_bytes[i..][0..4], .little);
                 if (state_val == 3) is_active = true; // 3 = active
             }
-            info.is_active = is_active;
             if (is_active) {
                 ctx.active_toplevel = idx;
             } else if (ctx.active_toplevel == idx) {
@@ -342,7 +288,6 @@ fn toplevelHandleListener(handle: *zwlr.ForeignToplevelHandleV1, event: zwlr.For
         },
         .done => {},
         .closed => {
-            info.is_closed = true;
             ctx.bar_dirty = true;
             // Remove this toplevel from the list
             if (ctx.active_toplevel == idx) ctx.active_toplevel = null;
@@ -390,7 +335,6 @@ fn workspaceHandleListener(handle: *ext.WorkspaceHandleV1, event: ext.WorkspaceH
             const len = @min(src.len, info.name.len - 1);
             @memcpy(info.name[0..len], src[0..len]);
             info.name[len] = 0;
-            info.name_len = len;
             ctx.bar_dirty = true;
         },
         .state => |ev| {
@@ -402,14 +346,7 @@ fn workspaceHandleListener(handle: *ext.WorkspaceHandleV1, event: ext.WorkspaceH
             }
             ctx.bar_dirty = true;
         },
-        .id => |ev| {
-            const src = std.mem.span(ev.id);
-            const len = @min(src.len, info.ws_id.len - 1);
-            @memcpy(info.ws_id[0..len], src[0..len]);
-            info.ws_id[len] = 0;
-            info.ws_id_len = len;
-            ctx.bar_dirty = true;
-        },
+        .id => ctx.bar_dirty = true,
         .removed => {
             ctx.bar_dirty = true;
             handle.destroy();
@@ -463,42 +400,11 @@ pub const LayerSurface = struct {
         };
     }
 
-    pub fn requestFrame(self: *LayerSurface) void {
-        if (self.frame_cb) |cb| cb.destroy();
-        const cb = self.surface.frame() catch return;
-        self.frame_cb = cb;
-    }
-
-    pub fn resize(self: *LayerSurface, height: u32) void {
-        if (self.layer_surface) |ls| {
-            ls.setSize(0, height);
-            ls.setExclusiveZone(@intCast(height));
-        }
-    }
-
     pub fn destroy(self: *LayerSurface) void {
         if (self.frame_cb) |cb| cb.destroy();
         if (self.layer_surface) |ls| ls.destroy();
         self.surface.destroy();
         self.* = undefined;
-    }
-};
-
-pub const DamageTracker = struct {
-    full: bool = false,
-    pending_full: bool = false,
-
-    pub fn markFull(self: *DamageTracker) void {
-        self.pending_full = true;
-    }
-
-    pub fn commit(self: *DamageTracker) void {
-        self.full = self.pending_full;
-        self.pending_full = false;
-    }
-
-    pub fn reset(self: *DamageTracker) void {
-        self.full = false;
     }
 };
 
@@ -508,7 +414,6 @@ pub const ShmBuffer = struct {
     width: i32 = 0,
     height: i32 = 0,
     stride: i32 = 0,
-    size: usize = 0,
 
     pub fn create(shm: *wl.Shm, w: i32, h: i32) !ShmBuffer {
         const raw_stride = w * 4;
@@ -537,7 +442,6 @@ pub const ShmBuffer = struct {
             .width = w,
             .height = h,
             .stride = stride,
-            .size = pool_size,
         };
     }
 
@@ -547,6 +451,18 @@ pub const ShmBuffer = struct {
         self.* = undefined;
     }
 };
+
+pub fn setCursorShape(ctx: *Context, serial: u32, shape: CursorShape) void {
+    if (ctx.cursor_shape_manager == null) return;
+    if (ctx.pointer) |ptr| {
+        const dev = ctx.cursor_shape_manager.?.getPointer(ptr) catch |err| {
+            std.log.warn("cursor shape: {s}", .{@errorName(err)});
+            return;
+        };
+        defer dev.destroy();
+        dev.setShape(serial, shape);
+    }
+}
 
 fn createFile(size: usize) !i32 {
     const fd = try std.posix.memfd_create("wl-shm", 0);
