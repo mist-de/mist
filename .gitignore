@@ -21,3 +21,9 @@ Thumbs.db
 # Secret / local
 .env
 *.local
+
+# Wayland dependency symlinks (nixos-specific)
+.wayland-dep/
+
+# Wayland scanner binary (generated artifact)
+test-scanner

@@ -1,4 +1,5 @@
 const std = @import("std");
+const cc = @import("c.zig").c;
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const zwlr = wayland.client.zwlr;
@@ -13,7 +14,8 @@ const Font = render_mod.Font;
 const config_mod = @import("config.zig");
 const Color = config_mod.Color;
 const mpris_mod = @import("mpris.zig");
-const media_popup_mod = @import("media_popup.zig");
+const sidebar_mod = @import("sidebar.zig");
+const SIDEBAR_W = sidebar_mod.SIDEBAR_W;
 const Rect = config_mod.Rect;
 const Appearance = config_mod.Appearance;
 
@@ -105,7 +107,8 @@ pub const Bar = struct {
                 ls.ackConfigure(cfg.serial);
                 bar.layer.configured = true;
                 bar.layer.width = @intCast(cfg.width);
-                bar.layer.height = @intCast(cfg.height);
+                bar.layer.height = Appearance.bar_height;
+                ls.setSize(0, @intCast(Appearance.bar_height));
                 bar.needs_full_redraw = true;
             },
             .closed => {},
@@ -132,6 +135,7 @@ pub const Bar = struct {
 
         var bar = Bar{};
         bar.layer = try LayerSurface.create(ctx, output, anchor, cfg.height);
+        ctx.bar_surface = bar.layer.surface;
         bar.rect = .{ .x = 0, .y = 0, .width = 0, .height = cfg.height };
 
         {
@@ -292,8 +296,8 @@ pub const Bar = struct {
                     const colTop: i32 = @divTrunc(bar_h - colH, 2);
                     const row1Y: i32 = colTop + fSml.baselineOffset();
                     const row2Y: i32 = row1Y - fSml.baselineOffset() + fSml.lineHeight() + (-4) + f.baselineOffset();
-                    var appBuf: [512]u8 = undefined;
-                    var titleBuf: [512]u8 = undefined;
+                    var appBuf: [128]u8 = undefined;
+                    var titleBuf: [256]u8 = undefined;
                     const appNameFinal = truncateText(fSml, appName, awMaxW, &appBuf);
                     const titleFinal = truncateText(f, windowTitle, awMaxW, &titleBuf);
                     render_mod.renderText(&canvas, fSml, appNameFinal, awX, row1Y, colSubtext);
@@ -380,7 +384,8 @@ pub const Bar = struct {
             if (self.font_material) |*fMat| {
                 const tbl = @divTrunc(bar_h - fMat.lineHeight(), 2) + fMat.baselineOffset();
                 const icon = if (mpris.has_player and mpris.status == .playing) "pause" else "music_note";
-                render_mod.renderText(&canvas, fMat, icon, mediaRingCX - 9, tbl, colLayer1);
+                const iconW = render_mod.textWidth(fMat, icon);
+                render_mod.renderText(&canvas, fMat, icon, mediaRingCX - @divTrunc(iconW, 2), tbl, colLayer1);
             }
 
             resX += 24;
@@ -479,7 +484,7 @@ pub const Bar = struct {
 
             const tbl = @divTrunc(bar_h - fMat.lineHeight(), 2) + fMat.baselineOffset();
 
-            // Notification (outside group, no capsule)
+            // Notification icon (outside group, no capsule)
             const notifX = rightEdgeX - groupPadding - notifW;
             render_mod.renderText(&canvas, fMat, "notifications", notifX, tbl, colOnLayer0);
             {
@@ -628,7 +633,7 @@ pub const Bar = struct {
 
             // Clock
             if (self.font) |*f| {
-                const c = @import("c.zig").c;
+                const c = @import("cbasic.zig").c;
                 var raw: c.time_t = undefined;
                 _ = c.time(&raw);
                 var tm: c.tm = undefined;
@@ -670,11 +675,10 @@ pub const Bar = struct {
             }
         }
 
-        // 6. Commit to compositor
+        // 6. Commit to compositor (no flush — batched in main loop)
         self.layer.surface.attach(buf.buffer, 0, 0);
         self.layer.surface.damageBuffer(0, 0, @intCast(buf.width), @intCast(buf.height));
         self.layer.surface.commit();
-        ctx.flush();
 
         self.needs_full_redraw = false;
     }
@@ -683,11 +687,13 @@ pub const Bar = struct {
 // Input dispatch: seat, pointer, keyboard, click handling
 
 pub fn seatListener(seat: *wl.Seat, event: wl.Seat.Event, ctx: *Context) void {
+    std.log.info("seat event: {s}", .{@tagName(event)});
     switch (event) {
         .name => |name| {
             std.log.info("seat name: {s}", .{name.name});
         },
         .capabilities => |caps| {
+            std.log.info("seat capabilities: pointer={} keyboard={}", .{ caps.capabilities.pointer, caps.capabilities.keyboard });
             if (ctx.pointer) |p| {
                 p.release();
                 ctx.pointer = null;
@@ -725,44 +731,106 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
         .motion => |motion| {
             ctx.pointer_x = motion.surface_x.toInt();
             ctx.pointer_y = motion.surface_y.toInt();
-            // Set cursor when pointer is over popup area (compositor may not send enter for popup)
-            if (ctx.popup_surface != null and ctx.media_popup.visible) {
+            // Set cursor shape for sidebar and popup surfaces
+            if (ctx.sidebar.visible and ctx.pointer_surface == ctx.sidebar.surface) {
+                setCursorShape(ctx, ctx.last_enter_serial, .default);
+            } else if (ctx.popup_surface != null and ctx.media_popup.visible) {
                 setCursorShape(ctx, ctx.last_enter_serial, .default);
             }
         },
         .button => |btn| {
             if (btn.state == .pressed) {
+                std.log.info("click: pointer_surface={*} bar_surface={*} sidebar_surface={*} sidebar.visible={} x={} y={}", .{
+                    ctx.pointer_surface, ctx.bar_surface, if (ctx.sidebar.surface) |s| s else null,
+                    ctx.sidebar.visible, ctx.pointer_x, ctx.pointer_y,
+                });
+
+                // Check notification panel click (subsurface of bar)
+                if (ctx.notification_popup.has_content and ctx.pointer_surface == ctx.notification_popup.surface) {
+                    ctx.notification_popup.handleClick(ctx, ctx.pointer_x, ctx.pointer_y);
+                    return;
+                }
+
+                // Notification bell icon on bar — always check first
+                if (ctx.pointer_surface == ctx.bar_surface) {
+                    const bar_w: i32 = if (ctx.output_count > 0) ctx.outputs[0].mode_w else 1366;
+                    const bar_h: i32 = Appearance.bar_height;
+                    const screenRounding: i32 = 14;
+                    const rightEdgeX = bar_w - screenRounding;
+                    const groupPadding: i32 = 5;
+                    for (0..output_count) |oi| {
+                        if (outputs[oi].bar) |*b| {
+                            if (b.font_material) |*fMat| {
+                                const notifW = render_mod.textWidth(fMat, "notifications");
+                                const notif_x0 = rightEdgeX - groupPadding - notifW;
+                                // Include 14px group background area to the left of icon
+                                const notif_click_x0 = notif_x0 - 14;
+                                std.log.info("notif check: x={} notif_x0={} notif_x0+notifW={}", .{ ctx.pointer_x, notif_x0, notif_x0 + notifW });
+                                if (ctx.pointer_x >= notif_click_x0 and ctx.pointer_x < notif_x0 + notifW and
+                                    ctx.pointer_y >= 0 and ctx.pointer_y < bar_h)
+                                {
+                                    std.log.info("notif icon matched — toggling sidebar", .{});
+                                    ctx.sidebar_open = !ctx.sidebar_open;
+                                    if (ctx.sidebar_open) {
+                                        ctx.sidebar.show(ctx);
+                                    } else {
+                                        ctx.sidebar.hide(ctx);
+                                    }
+                                    return;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // If sidebar is open, check if click is on it.
+                if (ctx.sidebar.visible) {
+                    if (ctx.pointer_surface == ctx.sidebar.surface) {
+                        std.log.info("sidebar surface match — calling handleClick", .{});
+                        ctx.sidebar.handleClick(ctx, ctx.pointer_x, ctx.pointer_y);
+                        return;
+                    }
+                    const bar_w: i32 = if (ctx.output_count > 0) ctx.outputs[0].mode_w else 1366;
+                    const sidebar_left = @max(0, bar_w - SIDEBAR_W);
+                    std.log.info("sidebar coord check: x={} sidebar_left={} sidebar_right={} y={} bar_h={}", .{ ctx.pointer_x, sidebar_left, sidebar_left + SIDEBAR_W, ctx.pointer_y, Appearance.bar_height });
+                    if (ctx.pointer_x >= sidebar_left and ctx.pointer_x < sidebar_left + SIDEBAR_W and
+                        ctx.pointer_y >= 0 and ctx.pointer_y < Appearance.bar_height)
+                    {
+                        std.log.info("sidebar coord match — calling handleClick", .{});
+                        ctx.sidebar.handleClick(ctx, ctx.pointer_x - sidebar_left, ctx.pointer_y);
+                        return;
+                    }
+                    // Click is outside sidebar → dismiss
+                    std.log.info("click outside sidebar — dismissing", .{});
+                    ctx.sidebar.hide(ctx);
+                    ctx.sidebar_open = false;
+                    return;
+                }
                 const on_popup = ctx.popup_surface != null and ctx.last_enter_surface == ctx.popup_surface;
                 if (on_popup) {
                     if (ctx.mpris) |mpris| {
-                        ctx.media_popup.handleClick(ctx.pointer_x, ctx.pointer_y, btn.button, mpris);
+                        ctx.media_popup.handleClick(ctx, ctx.pointer_x, ctx.pointer_y, btn.button, mpris);
                     }
                     return;
                 }
                 // Position-based fallback: compositor might not send enter for popup surface.
-                // But if click is on the bar's media widget area, route to bar handler (to toggle popup off).
                 if (ctx.popup_surface != null and ctx.media_popup.visible) {
-                    const bar_h: i32 = 40;
-                    const on_media = ctx.pointer_x >= ctx.media_area_x0 and ctx.pointer_x < ctx.media_area_x1 and ctx.pointer_y >= 0 and ctx.pointer_y < bar_h;
-                    if (on_media) {
-                        handleClick(ctx, ctx.pointer_x, ctx.pointer_y, btn.button);
-                        return;
-                    }
                     const mp = @import("media_popup.zig");
+                    // Convert bar-local coords to popup-local coords
                     const bx = ctx.pointer_x - ctx.media_popup.popup_left;
                     const by = ctx.pointer_y - mp.POPUP_MARGIN_TOP;
                     if (bx >= 0 and bx < mp.POPUP_W and by >= 0 and by < mp.POPUP_H) {
                         if (ctx.mpris) |mpris| {
-                            ctx.media_popup.handleClick(bx, by, btn.button, mpris);
+                            ctx.media_popup.handleClick(ctx, bx, by, btn.button, mpris);
                         }
                         return;
                     }
-                    if (ctx.pointer_x >= 0 and ctx.pointer_x < mp.POPUP_W and
-                        ctx.pointer_y >= 0 and ctx.pointer_y < mp.POPUP_H)
-                    {
-                        if (ctx.mpris) |mpris| {
-                            ctx.media_popup.handleClick(ctx.pointer_x, ctx.pointer_y, btn.button, mpris);
-                        }
+                    // Click is outside popup — if on bar media area, toggle popup
+                    const bh: i32 = 40;
+                    const on_media = ctx.pointer_x >= ctx.media_area_x0 and ctx.pointer_x < ctx.media_area_x1 and ctx.pointer_y >= 0 and ctx.pointer_y < bh;
+                    if (on_media) {
+                        handleClick(ctx, ctx.pointer_x, ctx.pointer_y, btn.button);
                         return;
                     }
                 }
@@ -778,6 +846,11 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
         },
         .axis_discrete => |disc| {
             if (disc.axis != .vertical_scroll) return;
+            // Route scroll to sidebar only when pointer is over the sidebar surface
+            if (ctx.sidebar.visible and ctx.pointer_surface == ctx.sidebar.surface) {
+                ctx.sidebar.handleScroll(ctx, disc.discrete * 30);
+                return;
+            }
             const bar_w: i32 = if (ctx.output_count > 0) ctx.outputs[0].mode_w else 1366;
             const bar_h: i32 = 40;
             const ws = getWorkspaceLayout(bar_w, bar_h);
@@ -818,6 +891,11 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
         },
         .axis_value120 => |v120| {
             if (v120.axis != .vertical_scroll) return;
+            // Route scroll to sidebar only when pointer is over the sidebar surface
+            if (ctx.sidebar.visible and ctx.pointer_surface == ctx.sidebar.surface) {
+                ctx.sidebar.handleScroll(ctx, @divTrunc(v120.value120, 4));
+                return;
+            }
             const bar_w: i32 = if (ctx.output_count > 0) ctx.outputs[0].mode_w else 1366;
             const bar_h: i32 = 40;
             const ws = getWorkspaceLayout(bar_w, bar_h);
@@ -861,10 +939,81 @@ fn pointerListener(pointer: *wl.Pointer, event: wl.Pointer.Event, ctx: *Context)
 
 fn keyboardListener(kb: *wl.Keyboard, event: wl.Keyboard.Event, ctx: *Context) void {
     _ = kb;
-    _ = ctx;
+    std.log.info("keyboardListener called: event={s}", .{@tagName(event)});
     switch (event) {
-        .key => {},
-        .enter, .leave, .keymap, .modifiers, .repeat_info => {},
+        .keymap => |km| {
+            if (km.size == 0) return;
+            const map_shm = std.posix.mmap(
+                null,
+                km.size,
+                std.posix.PROT{ .READ = true },
+                std.posix.MAP{ .TYPE = .PRIVATE },
+                km.fd,
+                0,
+            ) catch |err| {
+                std.log.err("keyboard: mmap keymap failed: {}", .{err});
+                _ = std.c.close(km.fd);
+                return;
+            };
+            _ = std.c.close(km.fd);
+
+            if (ctx.xkb_ctx == null)
+                ctx.xkb_ctx = cc.xkb_context_new(cc.XKB_CONTEXT_NO_FLAGS);
+            if (ctx.xkb_ctx) |xkb_ctx| {
+                const keymap_str: []const u8 = @ptrCast(map_shm[0..km.size]);
+                const xkb_km = cc.xkb_keymap_new_from_string(xkb_ctx, keymap_str.ptr, cc.XKB_KEYMAP_FORMAT_TEXT_V1, 0);
+                if (xkb_km) |k| {
+                    if (ctx.xkb_state) |s| cc.xkb_state_unref(s);
+                    if (ctx.xkb_keymap) |old| cc.xkb_keymap_unref(old);
+                    ctx.xkb_keymap = k;
+                    ctx.xkb_state = cc.xkb_state_new(k);
+                    std.log.info("keyboard: xkb initialized, state={any}", .{ctx.xkb_state});
+                } else {
+                    std.log.err("keyboard: xkb_keymap_new_from_string returned null", .{});
+                }
+            }
+            std.posix.munmap(map_shm);
+        },
+        .modifiers => |mods| {
+            if (ctx.xkb_state) |s| {
+                _ = cc.xkb_state_update_mask(s, mods.mods_depressed, mods.mods_latched, mods.mods_locked, mods.group, 0, 0);
+            }
+        },
+        .key => |key| {
+            const pressed = key.state == .pressed;
+            const xkb_code = key.key + 8;
+            if (pressed and key.key == 1 and ctx.sidebar.visible) {
+                if (ctx.sidebar.todo_show_add) {
+                    ctx.sidebar.todo_show_add = false;
+                    ctx.sidebar.todo_input_len = 0;
+                    ctx.sidebar.todo_input_active = false;
+                    ctx.sidebar.needs_full_redraw = true;
+                    return;
+                }
+                ctx.sidebar.hide(ctx);
+                ctx.sidebar_open = false;
+                return;
+            }
+            if (pressed and ctx.sidebar.todo_show_add) {
+                if (ctx.xkb_state) |s| {
+                    const sym = cc.xkb_state_key_get_one_sym(s, xkb_code);
+                    if (sym == cc.XKB_KEY_Return or sym == cc.XKB_KEY_KP_Enter) {
+                        ctx.sidebar.addTodoFromInput();
+                        return;
+                    }
+                    if (sym == cc.XKB_KEY_BackSpace) {
+                        ctx.sidebar.deleteTodoInputChar();
+                        return;
+                    }
+                    var utf8_buf: [8]u8 = undefined;
+                    const len = cc.xkb_state_key_get_utf8(s, xkb_code, &utf8_buf, utf8_buf.len);
+                    if (len > 0) {
+                        ctx.sidebar.appendTodoInputChar(utf8_buf[0..@as(usize, @intCast(len))]);
+                    }
+                }
+            }
+        },
+        .enter, .leave, .repeat_info => {},
     }
 }
 
@@ -892,7 +1041,7 @@ fn feedScrollAccum(ctx: *Context, value: i32) void {
 /// Switch to a workspace by index.
 /// Uses dwl-ipc for MangoWM, otherwise ext-workspace or river-control.
 /// Does NOT mark dirty — compositor response events trigger the redraw (avoids blink).
-fn switchToWorkspace(ctx: *Context, idx: usize) void {
+pub fn switchToWorkspace(ctx: *Context, idx: usize) void {
     if (ctx.dwl_ipc_output) |dwl| {
         const tagmask: u32 = @as(u32, 1) << @intCast(idx);
         dwl.setTags(tagmask, 1);
@@ -1009,58 +1158,36 @@ fn handleClick(ctx: *Context, x: i32, y: i32, button: u32) void {
         return;
     }
 
-    var fMat_click: *Font = undefined;
-    var hasFont: bool = false;
+    // Mic icon click → toggle mic mute
     for (0..output_count) |oi| {
         if (outputs[oi].bar) |*b| {
-            if (b.font_material) |*fm| {
-                fMat_click = fm;
-                hasFont = true;
-                break;
+            if (b.font_material) |*fMat| {
+                const mic = getMicIconBounds(bar_w, fMat);
+                if (x >= mic.x0 and x < mic.x0 + mic.w and y >= 0 and y < bar_h) {
+                    config_mod.toggleMicMute(&ctx.resources);
+                    ctx.bar_dirty = true;
+                    return;
+                }
+                const vol = getVolumeIconBounds(bar_w, fMat);
+                if (x >= vol.x0 and x < vol.x0 + vol.w and y >= 0 and y < bar_h) {
+                    config_mod.toggleAudioMute(&ctx.resources);
+                    ctx.bar_dirty = true;
+                    return;
+                }
             }
-        }
-    }
-    if (hasFont) {
-        const btW_click = render_mod.textWidth(fMat_click, "bluetooth_connected");
-        const wifiW_click = render_mod.textWidth(fMat_click, "network_wifi");
-        const notifW_click = render_mod.textWidth(fMat_click, "notifications");
-        const micW_click = render_mod.textWidth(fMat_click, "mic_off");
-        const volW_click = render_mod.textWidth(fMat_click, "volume_off");
-        const xkbW_click: i32 = 20;
-        const indSpacing: i32 = 15;
-        const groupPadding: i32 = 5;
-        const rightEdgeX = bar_w - screenRounding;
-
-        const notif_x0 = rightEdgeX - groupPadding - notifW_click;
-        if (x >= notif_x0 and x < notif_x0 + notifW_click and y >= 0 and y < bar_h) {
-            std.log.info("notifications clicked", .{});
-            return;
-        }
-
-        const groupRight = notif_x0 - 10;
-        var indicatorRX: i32 = groupRight - groupPadding;
-        indicatorRX -= btW_click + indSpacing;
-        indicatorRX -= wifiW_click + indSpacing;
-        indicatorRX -= xkbW_click + indSpacing;
-        const mic_x0 = indicatorRX - micW_click;
-        indicatorRX -= micW_click + indSpacing;
-        const vol_x0 = indicatorRX - volW_click;
-
-        if (x >= vol_x0 and x < vol_x0 + volW_click and y >= 0 and y < bar_h) {
-            config_mod.toggleAudioMute(&ctx.resources);
-            markAllDirty(ctx);
-            return;
-        }
-        if (x >= mic_x0 and x < mic_x0 + micW_click and y >= 0 and y < bar_h) {
-            config_mod.toggleMicMute(&ctx.resources);
-            markAllDirty(ctx);
-            return;
+            break;
         }
     }
 
+    // Right indicator button area → toggle sidebar (matches end-4 rightSidebarButton)
     const indicatorAreaX: i32 = bar_w - screenRounding - 200;
     if (x >= indicatorAreaX and x < bar_w - screenRounding and y >= 0 and y < bar_h) {
-        std.log.info("right indicator area clicked", .{});
+        ctx.sidebar_open = !ctx.sidebar_open;
+        if (ctx.sidebar_open) {
+            ctx.sidebar.show(ctx);
+        } else {
+            ctx.sidebar.hide(ctx);
+        }
         return;
     }
 

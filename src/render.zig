@@ -721,3 +721,28 @@ pub fn textWidth(font: *Font, text: []const u8) i32 {
     }
     return (total_26_6 + 32) >> 6;
 }
+
+pub const GlyphMetrics = struct {
+    width: i32,
+    height: i32,
+    top: i32,
+    left: i32,
+};
+
+pub fn measureGlyph(font: *Font, text: []const u8) GlyphMetrics {
+    if (text.len == 0) return .{ .width = 0, .height = 0, .top = 0, .left = 0 };
+
+    var glyph_count: c_uint = 0;
+    const info, _ = shape(font, text, &glyph_count);
+    if (glyph_count == 0) return .{ .width = 0, .height = 0, .top = 0, .left = 0 };
+
+    const gi = info[0];
+    const glyph = font.getGlyph(gi.codepoint) catch return .{ .width = 0, .height = 0, .top = 0, .left = 0 };
+
+    return .{
+        .width = @intCast(glyph.width),
+        .height = @intCast(glyph.height),
+        .top = glyph.top,
+        .left = glyph.left,
+    };
+}

@@ -7,9 +7,16 @@ const ext = wayland.client.ext;
 const zriver = wayland.client.zriver;
 const zdwl = wayland.client.zdwl;
 
-const ResourceState = @import("config.zig").ResourceState;
+const config_mod = @import("config.zig");
+const cc = @import("c.zig").c;
+const ResourceState = config_mod.ResourceState;
+const Appearance = config_mod.Appearance;
 const mpris_mod = @import("mpris.zig");
 const MediaPopup = @import("media_popup.zig").MediaPopup;
+const NotificationPanel = @import("notification_popup.zig").NotificationPanel;
+const notif_mod = @import("notifications.zig");
+const sidebar_mod = @import("sidebar.zig");
+const ipc_mod = @import("ipc.zig");
 
 pub const CursorShape = wp.CursorShapeDeviceV1.Shape;
 
@@ -52,6 +59,7 @@ pub const Context = struct {
     display: *wl.Display,
     registry: *wl.Registry,
     compositor: ?*wl.Compositor = null,
+    sub_compositor: ?*wl.Subcompositor = null,
     shm: ?*wl.Shm = null,
     layer_shell: ?*zwlr.LayerShellV1 = null,
     cursor_shape_manager: ?*wp.CursorShapeManagerV1 = null,
@@ -60,6 +68,9 @@ pub const Context = struct {
     seat: ?*wl.Seat = null,
     pointer: ?*wl.Pointer = null,
     keyboard: ?*wl.Keyboard = null,
+    xkb_ctx: ?*cc.xkb_context = null,
+    xkb_keymap: ?*cc.xkb_keymap = null,
+    xkb_state: ?*cc.xkb_state = null,
     river_control: ?*zriver.ControlV1 = null,
     dwl_ipc_manager: ?*zdwl.IpcManagerV2 = null,
     dwl_ipc_output: ?*zdwl.IpcOutputV2 = null,
@@ -92,6 +103,12 @@ pub const Context = struct {
     dwl_ipc_active_tag: ?u32 = null,
 
     media_popup: MediaPopup = .{},
+    notification_popup: NotificationPanel = .{},
+    notifications: notif_mod.NotificationServer = .{},
+    sidebar: sidebar_mod.Sidebar = .{},
+    ipc: ipc_mod.IpcServer = .{},
+    sidebar_open: bool = false,
+    bar_surface: ?*wl.Surface = null,
 
     mpris: ?*mpris_mod.MprisPlayer = null,
     media_area_x0: i32 = 0,
@@ -162,6 +179,9 @@ fn registryListener(registry: *wl.Registry, event: wl.Registry.Event, ctx: *Cont
             if (std.mem.eql(u8, iface, std.mem.span(wl.Compositor.interface.name))) {
                 ctx.compositor = registry.bind(global.name, wl.Compositor, global.version) catch null;
                 std.log.info("  -> compositor={any}", .{ctx.compositor});
+            } else if (std.mem.eql(u8, iface, "wl_subcompositor")) {
+                ctx.sub_compositor = registry.bind(global.name, wl.Subcompositor, global.version) catch null;
+                std.log.info("  -> sub_compositor={any}", .{ctx.sub_compositor});
             } else if (std.mem.eql(u8, iface, std.mem.span(wl.Shm.interface.name))) {
                 ctx.shm = registry.bind(global.name, wl.Shm, global.version) catch null;
                 std.log.info("  -> shm={any}", .{ctx.shm});
@@ -429,14 +449,16 @@ pub const LayerSurface = struct {
 
         layer.setSize(0, height);
         layer.setAnchor(anchor);
-        layer.setExclusiveZone(@intCast(height));
+        // Bar exclusive zone = bar height only (40px). No Hyprland gaps in MangoWM/Niri.
+        // The gap is handled by the sidebar's own offset below.
+        layer.setExclusiveZone(@intCast(Appearance.bar_height));
         layer.setKeyboardInteractivity(.none);
 
         surface.commit();
 
         return LayerSurface{
             .surface = surface,
-            .layer_surface = layer,
+            .layer_surface        = layer,
         };
     }
 

@@ -102,6 +102,8 @@ pub const Appearance = struct {
     pub const m3surface_container_low = Color.rgba(0x1c, 0x1b, 0x1c, 0xFF);
     pub const m3primary = Color.rgba(0xcb, 0xc4, 0xcb, 0xFF);
     pub const m3on_primary = Color.rgba(0x32, 0x2f, 0x34, 0xFF);
+    pub const m3primary_container = Color.rgba(0x2d, 0x2a, 0x2f, 0xFF);
+    pub const m3on_primary_container = Color.rgba(0xbc, 0xb6, 0xbc, 0xFF);
     pub const m3on_surface_variant = Color.rgba(0xcb, 0xc5, 0xca, 0xFF);
     pub const m3outline = Color.rgba(0x94, 0x8f, 0x94, 0xFF);
     pub const m3outline_variant = Color.rgba(0x49, 0x46, 0x4a, 0xFF);
@@ -109,17 +111,38 @@ pub const Appearance = struct {
     pub const m3on_secondary_container = Color.rgba(0xec, 0xe6, 0xe9, 0xFF);
 
     // Semantic layer colors
+    pub const col_layer0 = m3background;
+    pub const col_layer0_border = Color.rgba(0x3a, 0x39, 0x3d, 0xFF); // mix(outlineVariant, layer0, 0.4)
     pub const col_layer1 = Color.rgba(0x1c, 0x1b, 0x1c, 0xFF);
+    pub const col_layer2 = Color.rgba(0x20, 0x1f, 0x20, 0xFF); // surfaceContainer
     pub const col_on_layer0 = m3on_background;
     pub const col_on_layer1 = m3on_surface_variant;
     pub const col_on_layer1_inactive = Color.rgba(0x7d, 0x78, 0x7c, 0xFF);
+    pub const col_on_layer2 = Color.rgba(0xe6, 0xe1, 0xe1, 0xFF); // m3onSurface
     pub const col_primary = m3primary;
     pub const col_on_primary = m3on_primary;
+    pub const col_primary_container = m3primary_container;
+    pub const col_on_primary_container = m3on_primary_container;
+    pub const col_secondary_container = m3secondary_container;
     pub const col_secondary_container_alpha = Color.rgba(0x4d, 0x4b, 0x4d, 0x99);
     pub const col_on_secondary_container = m3on_secondary_container;
     pub const col_outline_variant = m3outline_variant;
     pub const col_outline = m3outline;
     pub const col_subtext = m3outline;
+    pub const col_error = Color.rgba(0xf2, 0x6a, 0x6a, 0xFF);
+
+    // Sidebar sizing (from end-4 Appearance.sizes)
+    pub const sidebar_width: i32 = 460;
+    pub const sidebar_margin: i32 = 5; // hyprlandGapsOut
+    pub const sidebar_gap: i32 = 2; // visual gap between bar bottom and sidebar content top
+    pub const sidebar_elevation: i32 = 10; // elevationMargin (left gap)
+    pub const sidebar_padding: i32 = 10; // inner padding
+    pub const sidebar_bg_radius: i32 = 19; // screenRounding(23) - hyprlandGapsOut(5) + 1
+    pub const sidebar_widget_radius: i32 = 17; // normal rounding
+    pub const sidebar_small_radius: i32 = 12; // small rounding (pills, notification items)
+    pub const sidebar_full_radius: i32 = 9999; // pill shapes
+    pub const sidebar_bottom_height: i32 = 350; // BottomWidgetGroup fixed height
+    pub const sidebar_bottom_nav_w: i32 = 50; // navigation rail width
 };
 
 // Configuration
@@ -176,7 +199,7 @@ fn findSystemFont(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
     return null;
 }
 
-const cc_cfg = @import("c.zig").c;
+const cc_cfg = @import("cbasic.zig").c;
 
 fn findFontByFamily(allocator: std.mem.Allocator, family: []const u8) ?[]u8 {
     var cmd_buf: [512]u8 = undefined;
@@ -185,7 +208,7 @@ fn findFontByFamily(allocator: std.mem.Allocator, family: []const u8) ?[]u8 {
     const cmd_z: [*:0]const u8 = @ptrCast(&cmd_buf);
     const f = cc_cfg.popen(cmd_z, "r") orelse return null;
     defer _ = cc_cfg.pclose(f);
-    var line: [4096]u8 = undefined;
+    var line: [512]u8 = undefined;
     if (cc_cfg.fgets(&line, @intCast(line.len), f)) |result| {
         const path = std.mem.trim(u8, std.mem.span(result), " \n\r\t");
         if (path.len > 0 and fileExists(path)) {
@@ -468,7 +491,7 @@ fn readBattery(state: *ResourceState) void {
 }
 
 pub fn readAudioState(state: *ResourceState) void {
-    const c2 = @import("c.zig").c;
+    const c2 = @import("cbasic.zig").c;
     // Sink volume/mute
     const sink_fp = c2.popen("wpctl get-volume @DEFAULT_SINK@ 2>/dev/null", "r");
     if (sink_fp) |fp| {
@@ -500,21 +523,21 @@ pub fn readAudioState(state: *ResourceState) void {
 }
 
 pub fn toggleAudioMute(state: *ResourceState) void {
-    const c = @import("c.zig").c;
+    const c = @import("cbasic.zig").c;
     _ = c.system("wpctl set-mute @DEFAULT_SINK@ toggle");
     state.audio_muted = !state.audio_muted;
     state.last_vol_change_ms = nowMs();
 }
 
 pub fn toggleMicMute(state: *ResourceState) void {
-    const c = @import("c.zig").c;
+    const c = @import("cbasic.zig").c;
     _ = c.system("wpctl set-mute @DEFAULT_SOURCE@ toggle");
     state.mic_muted = !state.mic_muted;
     state.last_mic_change_ms = nowMs();
 }
 
 pub fn setVolume(state: *ResourceState, vol: f32) void {
-    const c = @import("c.zig").c;
+    const c = @import("cbasic.zig").c;
     const clamped = @min(2.0, @max(0.0, vol));
     var cmd_buf: [64]u8 = undefined;
     const cmd = std.fmt.bufPrint(cmd_buf[0..], "wpctl set-volume @DEFAULT_SINK@ {d:.2}", .{clamped}) catch return;
@@ -525,7 +548,7 @@ pub fn setVolume(state: *ResourceState, vol: f32) void {
 }
 
 pub fn setMicVolume(state: *ResourceState, vol: f32) void {
-    const c = @import("c.zig").c;
+    const c = @import("cbasic.zig").c;
     const clamped = @min(2.0, @max(0.0, vol));
     var cmd_buf: [64]u8 = undefined;
     const cmd = std.fmt.bufPrint(cmd_buf[0..], "wpctl set-volume @DEFAULT_SOURCE@ {d:.2}", .{clamped}) catch return;

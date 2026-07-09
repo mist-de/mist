@@ -12,7 +12,6 @@ const config_mod = @import("config.zig");
 const Color = config_mod.Color;
 const mpris_mod = @import("mpris.zig");
 
-
 pub const POPUP_W: i32 = 360;
 pub const POPUP_H: i32 = 130;
 
@@ -78,8 +77,8 @@ pub const MediaPopup = struct {
     show_pending: bool = false,
     needs_redraw: bool = false,
     needs_full_redraw: bool = true,
-    wave_amplitude: f32 = 0, // smooth amplitude transition (0 = flat, PROGRESS_H*0.5 = full wave)
-        popup_left: i32 = 0,
+    wave_amplitude: f32 = 0,
+    popup_left: i32 = 0,
     output_idx: usize = 0,
 
     pub fn init(self: *MediaPopup, ctx: *Context, output_idx: usize, allocator: std.mem.Allocator) !void {
@@ -208,54 +207,60 @@ pub const MediaPopup = struct {
     }
 
     fn drawProgress(canvas: *Canvas, self: *MediaPopup, mpris: *const mpris_mod.MprisPlayer, colLayer0: Color, colPrimary: Color, colSecondaryContainer: Color, colSubtext: Color) void {
-        // Clear and redraw wave progress
         const PROGRESS_X: i32 = COL_X;
         const PROGRESS_W: i32 = POPUP_W - COL_X - MARGIN;
         const max_amplitude: f32 = @as(f32, @floatFromInt(PROGRESS_H)) * 0.5;
-        const overshoot: i32 = @as(i32, @intFromFloat(max_amplitude)) + 1;
-        canvas.fillRect(PROGRESS_X, PROGRESS_Y - overshoot, PROGRESS_W, PROGRESS_H + 2 * overshoot, colLayer0);
+
+        const is_playing = mpris.status == .playing;
+        const target_amplitude: f32 = if (is_playing and PROGRESS_W > PROGRESS_H) max_amplitude else 0;
+        self.wave_amplitude += (target_amplitude - self.wave_amplitude) * 0.25;
+        if (@abs(self.wave_amplitude - target_amplitude) < 0.001) {
+            self.wave_amplitude = target_amplitude;
+        }
 
         const progress: f32 = if (mpris.length > 0)
             @as(f32, @floatFromInt(mpris.position)) / @as(f32, @floatFromInt(mpris.length))
         else
             0;
         const fillW: i32 = if (progress > 0)
-            @intFromFloat(@as(f32, @floatFromInt(PROGRESS_W)) * progress)
+            @max(0, @as(i32, @intFromFloat(@as(f32, @floatFromInt(PROGRESS_W)) * progress)))
         else
             0;
 
-        const is_playing = mpris.status == .playing;
-        const target_amplitude: f32 = if (is_playing and PROGRESS_W > PROGRESS_H) max_amplitude else 0;
-        self.wave_amplitude += (target_amplitude - self.wave_amplitude) * 0.5;
-        if (@abs(self.wave_amplitude - target_amplitude) < 0.001) {
-            self.wave_amplitude = target_amplitude;
-        }
-        if (@abs(self.wave_amplitude - target_amplitude) > 0.001 and !is_playing) {
-            self.needs_redraw = true;
+        const overshoot: i32 = @max(1, @as(i32, @intFromFloat(max_amplitude)) + 1);
+        canvas.fillRect(PROGRESS_X, PROGRESS_Y - overshoot, PROGRESS_W, PROGRESS_H + 2 * overshoot, colLayer0);
+
+        if (PROGRESS_W <= 0) return;
+
+        if (self.wave_amplitude < 0.5) {
+            canvas.fillRoundedRectMSAA(PROGRESS_X, PROGRESS_Y, PROGRESS_W, PROGRESS_H, @divTrunc(PROGRESS_H, 2), colSecondaryContainer);
+            if (fillW > 0) {
+                canvas.fillRoundedRectMSAA(PROGRESS_X, PROGRESS_Y, fillW, PROGRESS_H, @divTrunc(PROGRESS_H, 2), colPrimary);
+            }
+        } else {
+            const cycles: f32 = 6.0;
+            const freq = cycles * std.math.tau / @as(f32, @floatFromInt(PROGRESS_W));
+            var ts: std.os.linux.timespec = undefined;
+            _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
+            const ms = @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+            const phase = @as(f32, @floatFromInt(ms)) / 400.0;
+
+            canvas.fillSineWave(PROGRESS_X, PROGRESS_Y, PROGRESS_W, PROGRESS_H, self.wave_amplitude, freq, phase, colSecondaryContainer);
+            if (fillW > 0) {
+                canvas.fillSineWave(PROGRESS_X, PROGRESS_Y, fillW, PROGRESS_H, self.wave_amplitude, freq, phase, colPrimary);
+            }
         }
 
-        const cycles: f32 = 6.0;
-        const freq = cycles * std.math.tau / @as(f32, @floatFromInt(PROGRESS_W));
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
-        const ms = @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
-        const phase = @as(f32, @floatFromInt(ms)) / 400.0;
-
-        canvas.fillSineWave(PROGRESS_X, PROGRESS_Y, PROGRESS_W, PROGRESS_H, self.wave_amplitude, freq, phase, colSecondaryContainer);
-        if (fillW > 0) {
-            canvas.fillSineWave(PROGRESS_X, PROGRESS_Y, fillW, PROGRESS_H, self.wave_amplitude, freq, phase, colPrimary);
-        }
-
-        // Clear time text area
-        var posBuf: [16]u8 = undefined;
-        var lenBuf: [16]u8 = undefined;
+        // Time text
+        var posBuf: [8]u8 = undefined;
+        var lenBuf: [8]u8 = undefined;
         const posStr = formatTime(mpris.position, &posBuf);
         const lenStr = formatTime(mpris.length, &lenBuf);
-        var timeFullBuf: [64]u8 = undefined;
+        var timeFullBuf: [24]u8 = undefined;
         const timeStr = std.fmt.bufPrint(&timeFullBuf, "{s} / {s}", .{ posStr, lenStr }) catch "";
         if (self.font_small) |*f| {
             const lh = f.lineHeight();
-            canvas.fillRect(COL_X, TIME_Y - lh, POPUP_W - COL_X - MARGIN, lh, colLayer0);
+            canvas.fillRect(COL_X, TIME_Y - lh - 2, POPUP_W - COL_X - MARGIN, lh + 6, colLayer0);
             if (timeStr.len > 0) {
                 render_mod.renderText(canvas, f, timeStr, COL_X, TIME_Y, colSubtext);
             }
@@ -291,7 +296,9 @@ pub const MediaPopup = struct {
                 }
                 if (lo == 0) break :blk "";
                 @memcpy(buf2[0..lo], title_str[0..lo]);
-                buf2[lo] = '.'; buf2[lo + 1] = '.'; buf2[lo + 2] = '.';
+                buf2[lo] = '.';
+                buf2[lo + 1] = '.';
+                buf2[lo + 2] = '.';
                 break :blk buf2[0 .. lo + 3];
             } else title_str;
             if (maxW > 0) {
@@ -312,7 +319,9 @@ pub const MediaPopup = struct {
                     }
                     if (lo == 0) break :blk "";
                     @memcpy(buf2[0..lo], mpris.artist[0..lo]);
-                    buf2[lo] = '.'; buf2[lo + 1] = '.'; buf2[lo + 2] = '.';
+                    buf2[lo] = '.';
+                    buf2[lo + 1] = '.';
+                    buf2[lo + 2] = '.';
                     break :blk buf2[0 .. lo + 3];
                 } else mpris.artist;
                 if (maxW > 0) {
@@ -382,7 +391,7 @@ pub const MediaPopup = struct {
         self.needs_redraw = true;
     }
 
-    pub fn commit(self: *MediaPopup, ctx: *Context) void {
+    pub fn commit(self: *MediaPopup, _: *Context) void {
         if (!self.visible or self.show_pending) return;
         const buf = self.buffer orelse return;
 
@@ -391,10 +400,9 @@ pub const MediaPopup = struct {
             s.damageBuffer(0, 0, buf.width, buf.height);
             s.commit();
         }
-        ctx.flush();
     }
 
-    pub fn handleClick(self: *MediaPopup, x: i32, y: i32, button: u32, mpris: *mpris_mod.MprisPlayer) void {
+    pub fn handleClick(self: *MediaPopup, ctx: *Context, x: i32, y: i32, button: u32, mpris: *mpris_mod.MprisPlayer) void {
         if (!self.visible) return;
         if (button != 0x110) return;
 
@@ -405,6 +413,9 @@ pub const MediaPopup = struct {
             mpris.playPause();
         } else if ((x - NEXT_CX) * (x - NEXT_CX) + (y - BTN_Y) * (y - BTN_Y) <= rSq) {
             mpris.next();
+        } else {
+            // Click on popup but not on any button — dismiss
+            self.hide(ctx);
         }
     }
 

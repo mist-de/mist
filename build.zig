@@ -5,22 +5,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const wayland_xml_path = blk: {
-        var code: u8 = undefined;
-        const raw = b.runAllowFail(&.{ "sh", "-c", "echo -n $WAYLAND_XML" }, &code, .ignore) catch
-            @panic("WAYLAND_XML not set. See README.md for setup.");
-        break :blk std.mem.trimEnd(u8, raw, &[_]u8{ '\n', '\r' });
-    };
-    const wayland_protocols_path = blk: {
-        var code: u8 = undefined;
-        const raw = b.runAllowFail(&.{ "sh", "-c", "echo -n $WAYLAND_PROTOCOLS" }, &code, .ignore) catch
-            @panic("WAYLAND_PROTOCOLS not set. See README.md for setup.");
-        break :blk std.mem.trimEnd(u8, raw, &[_]u8{ '\n', '\r' });
-    };
-
     const scanner = Scanner.create(b, .{
-        .wayland_xml = .{ .cwd_relative = wayland_xml_path },
-        .wayland_protocols = .{ .cwd_relative = wayland_protocols_path },
+        .wayland_xml = b.path(".wayland-dep/wayland.xml"),
+        .wayland_protocols = b.path(".wayland-dep/protocols"),
     });
 
     const wayland = b.createModule(.{ .root_source_file = scanner.result });
@@ -35,6 +22,7 @@ pub fn build(b: *std.Build) void {
     scanner.addSystemProtocol("stable/tablet/tablet-v2.xml");
 
     scanner.generate("wl_compositor", 6);
+    scanner.generate("wl_subcompositor", 1);
     scanner.generate("wl_shm", 1);
     scanner.generate("wl_seat", 8);
     scanner.generate("wl_output", 4);
@@ -48,7 +36,7 @@ pub fn build(b: *std.Build) void {
     scanner.generate("zdwl_ipc_manager_v2", 1);
 
     const exe = b.addExecutable(.{
-        .name = "mist-bar",
+        .name = "mist",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -66,6 +54,12 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkSystemLibrary("freetype", .{});
     exe.root_module.linkSystemLibrary("harfbuzz", .{});
     exe.root_module.linkSystemLibrary("basu", .{});
+
+    // stb_image + stb_image_resize (single-header C libs)
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/stb_impl.c"),
+        .flags = &.{"-O2"},
+    });
 
     const fonts_install = b.addInstallDirectory(.{
         .source_dir = b.path("fonts"),
