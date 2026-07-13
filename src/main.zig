@@ -11,6 +11,7 @@ const notif_mod = @import("notifications.zig");
 const ipc_handlers = @import("ipc_handlers.zig");
 const ipc_mod = @import("ipc.zig");
 const notif_popup_mod = @import("notification_popup.zig");
+const osd_mod = @import("osd.zig");
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.page_allocator;
@@ -101,6 +102,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Notification server (org.freedesktop.Notifications)
     ctx.notifications.init();
+
+    // OSD — volume / mic vertical sliders
+    ctx.osd.init(&ctx, 0, allocator) catch |err| {
+        std.log.warn("osd init: {s}", .{@errorName(err)});
+    };
 
     // Sidebar init
     ctx.sidebar.init(&ctx, 0, allocator) catch |err| {
@@ -246,6 +252,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Async art loading
         mpris.tickArtLoading();
 
+        // Detect volume/mic changes via IPC and show OSD
+        if (ctx.resources.last_vol_change_ms > 0 and now_ms - ctx.resources.last_vol_change_ms < 200) {
+            ctx.osd.setVolume(&ctx, ctx.resources.audio_volume, ctx.resources.audio_muted);
+        }
+        if (ctx.resources.last_mic_change_ms > 0 and now_ms - ctx.resources.last_mic_change_ms < 200) {
+            ctx.osd.setVolume(&ctx, ctx.resources.mic_volume, ctx.resources.mic_muted);
+        }
+
         // Resources update every 3s; also check for binary rebuild
         if (now_ms - last_resource_ms >= 3000) {
             last_resource_ms = now_ms;
@@ -357,6 +371,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (ctx.sidebar.visible and (ctx.sidebar.needs_redraw or ctx.sidebar.needs_full_redraw)) {
             ctx.sidebar.draw(&ctx);
             ctx.sidebar.commit(&ctx);
+        }
+
+        // OSD auto-hide timer
+        ctx.osd.tick(&ctx);
+
+        // Draw OSD when visible
+        if (ctx.osd.visible and ctx.osd.needs_redraw) {
+            ctx.osd.draw(&ctx);
+            ctx.osd.commit(&ctx);
         }
 
         // Single flush: all surface commits sent atomically to compositor

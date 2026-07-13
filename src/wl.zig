@@ -17,6 +17,7 @@ const NotificationPanel = @import("notification_popup.zig").NotificationPanel;
 const notif_mod = @import("notifications.zig");
 const sidebar_mod = @import("sidebar.zig");
 const ipc_mod = @import("ipc.zig");
+const osd_mod = @import("osd.zig");
 
 pub const CursorShape = wp.CursorShapeDeviceV1.Shape;
 
@@ -106,6 +107,7 @@ pub const Context = struct {
     notification_popup: NotificationPanel = .{},
     notifications: notif_mod.NotificationServer = .{},
     sidebar: sidebar_mod.Sidebar = .{},
+    osd: osd_mod.Osd = .{},
     ipc: ipc_mod.IpcServer = .{},
     sidebar_open: bool = false,
     bar_surface: ?*wl.Surface = null,
